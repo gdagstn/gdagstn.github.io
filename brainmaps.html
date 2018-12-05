@@ -223,7 +223,12 @@ This is how areas are indexed in the SVG: <br>
 </li>
  
 <p>We know this because it is how they were ordered in the original SVG file before conversion. <br> We create a simple function to paint the brainmap, which uses the <code>viridis</code> palettes. These palettes exist in 4 schemes, or options: A, B, C and D. This function first generates a heatmap colorkey using functions borrowed from <code>pheatmap</code>, then applies these colors to the areas in the SVG file. grImport2 imports the SVG file as an S4 object, which can be accessed directly with the “@” operator in its slots. A simple loop changes the slot colors by looking them up in the mapped color key.</p>
-<pre class="sourceCode r"><code class="sourceCode r">brainmap &lt;-<span class="st"> </span>function(gene, <span class="dt">option=</span><span class="st">&quot;C&quot;</span>){
+<pre class="sourceCode r"><code class="sourceCode r"><span class="co">#' Brainmap to visualize GTEx TPM profiles at the gene level</span>
+<span class="co">#' @param gene gene of interest (HGNC symbol)</span>
+<span class="co">#' @param option a character among A, B, C and D indicating the viridis color scheme</span>
+<span class="co">#' @return a pretty brain-shaped heatmap</span>
+
+brainmap &lt;-<span class="st"> </span>function(gene, <span class="dt">option=</span><span class="st">&quot;C&quot;</span>){
 genetpm &lt;-<span class="st"> </span><span class="kw">as.numeric</span>(gtex_brain_filtered[<span class="kw">which</span>(gtex_brain_filtered$Description ==<span class="st"> </span>gene),<span class="kw">c</span>(<span class="dv">3</span>:<span class="dv">12</span>)])
 gene_sc &lt;-<span class="st"> </span><span class="kw">scale</span>(genetpm)
 pal =<span class="st"> </span><span class="kw">viridis</span>(<span class="dv">10</span>, <span class="dt">option=</span>option)
@@ -240,7 +245,13 @@ for (i in cols$index) nubrain@content[[<span class="dv">1</span>]]@content[[i]]@
 <span class="kw">colorkey</span>(pal, tpmord)
 }</code></pre>
 <p><br> We also create a handy function to make a key that shows how colors were mapped to values, as in a heatmap. <br></p>
-<pre class="sourceCode r"><code class="sourceCode r">colorkey &lt;-<span class="st"> </span>function(colkey, values)
+<pre class="sourceCode r"><code class="sourceCode r"><span class="co">#' Color key</span>
+<span class="co">#' Generates a color key inside a plot</span>
+<span class="co">#' @param colkey a character vector of colors</span>
+<span class="co">#' @param values a numeric vector of values</span>
+<span class="co">#' @return a rectangle-shaped color key with minimum, mean and maximum values</span>
+
+colorkey &lt;-<span class="st"> </span>function(colkey, values)
 {
     heights &lt;-<span class="st"> </span><span class="kw">rev</span>(<span class="kw">seq</span>(<span class="fl">0.35</span>, <span class="fl">0.65</span>, <span class="dt">by=</span><span class="fl">0.03</span>))
     for(i in <span class="dv">1</span>:<span class="dv">10</span>) 
