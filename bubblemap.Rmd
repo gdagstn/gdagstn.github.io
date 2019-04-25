@@ -1,0 +1,228 @@
+---
+title: "Bubblemaps v1.0"
+author: Giuseppe D'Agostino
+output:
+    html_document:
+        toc: false
+        theme: 'cosmo'
+        highlight: 'tango'
+        code_folding: show
+        df_print: paged
+---
+ <br>
+ <a href = "https://gdagstn.github.io">Back to the index page.</a>
+ <br>
+This is an R base graphics implementation of a bubblechart arranged as a heatmap, i.e. with rows and columns arranged by hiearchical clustering. 
+It is currently used to map numerical values (such as correlation) to colours, and a second set of numerical values (assumed to be p-values, thus log-transformed and filtered for significance) to dot size. 
+ <br>
+
+
+```{r }
+require(viridis)
+require(pheatmap)
+```
+
+ <br>
+Let's simulate a correlation matrix by taking values from a random uniform distribution between -0.8 and 0.8.  
+<br>
+
+```{r }
+cors = data.frame(matrix(runif(n = 100, min = -0.8, max = 0.8), nrow = 10, ncol = 10))
+
+```
+
+ <br>
+We now simulate associated p-values. To do this we will first simulate a uniform distribution, then "spike in" some low p-values for high absolute correlations ( > 0.55).
+ <br>
+
+```{r }
+pvals = matrix(runif(n = 100, min = 0, max = 1), nrow = 10, ncol = 10)
+pvals[which(abs(cors) > 0.55)] = runif(n = length(which(abs(cors) > 0.55)), min = 1e-05, max = 1e-03)
+pvals = as.data.frame(pvals, stringsAsFactors = F)
+
+```
+
+<br>
+Let's look at the p value distribution to make sure it looks like a nice enough result, worth plotting
+<br>
+
+```{r,fig.width=5, fig.height=5, dpi = 100 }
+hist(as.matrix(pvals), breaks = 10, col = "cadetblue", border = NA)
+
+```
+<br>
+We first define a function, `makeGrid`, that draws a blank canvas with the size we need. It is a grid of x by y that will be populated by another function
+<br>
+
+
+```{r }
+#' Grid canvas
+#' @param ys numeric, number of rows in the grid
+#' @param xs numeric, number of columns in the grid
+#' @param ... passed to plot and points
+#' @return an empty canvas with ys and xs rows and columns
+
+makeGrid = function(ys, xs, ...)
+{
+	plot(y = 1:ys, x = rep(1, ys), xlim = c(1,xs), ...)
+	for(i in 2:xs) points(y = 1:ys, x = rep(i,ys), ...)
+}
+```
+
+We then define another function, `prop_cex` that maps dot sizes to values (cex). This function takes as arguments the values, bins (number of different dot sizes), a minimum (minc) and a maximum (maxc) dot size, a value with which NA values are replaced (na.value) and a value with which infinite values are replaced (inf.value)
+
+
+```{r }
+#' Grid canvas
+#' @param values vector of numeric values to be mapped to dot sizes
+#' @param bins numeric, number of dot sizes in which the values are binned
+#' @param minc numeric, smallest dot size
+#' @param maxc numeric, largest dot size
+#' @param na.value numeric, value with which NAs will be replaced in the values vector
+#' @param inf.value numeric, value with which Inf will be replaced in the values vector
+#' @return a vector of binned dot sizes mapped to the values
+
+prop_cex <- function(values, bins, minc = 0.3, maxc = 3, na.value = 0, inf.value = 400)
+{	
+	values[is.na(values)] = na.value
+	values[!is.finite(values)] = inf.value
+	
+	ordered.values <- values[order(values, decreasing = T)]
+
+	cex.values <- seq(minc, maxc, length.out = length(unique(values)))
+	cex.frame <- as.data.frame(cbind(cex.values, lfc =rev(unique(ordered.values))))
+	cex.binned <- seq(minc, maxc, length.out = bins)
+	outdf <- as.data.frame(values)
+	outdf$cex.values = sapply(outdf$values, function (x) cex.frame[which(cex.frame$lfc == x),1])
+	cex.values.binned = as.data.frame(sapply(outdf$cex.values, function(x) cut(x, breaks = cex.binned, include.lowest = T, labels = cex.binned[1:length(cex.binned)-1] )), stringsAsFactors = F)
+	outdf$binned = as.numeric(levels(cex.values.binned[,1])[cex.values.binned[,1]])
+ 	return(outdf$binned)
+}
+
+```
+
+The third function we need to define maps colors to values, and is directly taken by the `pheatmap` package. It takes as arguments the values and the color palette of choice.
+
+```{r }
+#' Color key
+#' @param values vector of numeric values to be mapped to colors
+#' @param pal vector of characters indicating colors 
+#' @return a vector of colors mapped to values
+
+colorKey <- function(values, pal = viridis(25, option = "B"))
+{
+	require(pheatmap)
+	values_sc <- scale(values)
+	bks <- pheatmap:::generate_breaks(values_sc, length(pal), center = F)
+	cols <- pheatmap:::scale_colours(values_sc, col=pal, breaks=bks, na_col = "gray")
+	cols <- as.character(cols)
+	return(cols)
+} 
+
+```
+
+Finally, we define the actual `bubbleMap` function. Having defined all the other parts separately, it is trivial to plot the dots with their respective colors and sizes in the grid drawn by `makeGrid`. This function takes as arguments the data frame of values, the data frame of p values, the number of dot size bins (passed to `prop_cex`), the color palette (passed to `colorKey`), the map title (maplabel passed in "main" to the plot function). sp is a spacer used to draw the color key properly. Notice that the way dots are ordered comes from the `pheatmap` clustering. This is a hack that will be improved on in the future.
+
+
+```{r }
+#' Bubble map
+#' @param valuedf data frame with numerics that will be mapped to colors
+#' @param pvaluedf data frame with numerics that will be mapped to dot sizes. treated as a p-value data frame (values < 0.05 are filtered)
+#' @param cbins numeric, passed to bins in prop_cex
+#' @param color_pal vector of characters indicating colors to be mapped
+#' @param maplabel character passed to main in the plot
+#' @param ... other arguments passed to plot()
+#' @return a pretty bubble map
+
+
+
+bubbleMap <- function(valuedf, pvaluedf, cbins = 5, color_pal = colorRampPalette(c("slateblue", "gray", "orange"))(25), maplabel = 
+	"Correlation", ...)
+{
+
+	pmap <- pheatmap(valuedf, silent = T)
+	valuedf <- as.data.frame(valuedf[rev(pmap$tree_row$order), pmap$tree_col$order])
+	pvaluedf <-  as.data.frame(pvaluedf[rev(pmap$tree_row$order), pmap$tree_col$order])
+
+	#pvaluedf$id = rownames(pvaluedf)
+	p2 = as.data.frame(t(pvaluedf))
+	p2$func = rownames(p2)
+	moltenp = reshape::melt.data.frame(p2)
+
+	moltenp$logP = as.numeric(-log10(moltenp$value))
+	moltenp$logP[moltenp$logP < 1.3] = 1
+	moltenp$cexes = prop_cex(moltenp$logP, bins = cbins, minc = 1, maxc = 4.4)
+	moltenp$cexes[moltenp$logP == 1] = 0.5
+
+	pcex = as.data.frame(cbind(10^-moltenp$logP, moltenp$cexes))
+	pcex = pcex[order(pcex[,1]),]
+	colnames(pcex) = c("logP", "cexes")
+
+	edgen = round(max(c(abs(min(as.numeric(unlist(valuedf)))), abs(max(as.numeric(unlist(valuedf)))))), digits = 1)
+	
+	c2 = as.data.frame(t(valuedf))
+	c2$func = rownames(c2)
+	moltenc = reshape::melt.data.frame(c2)
+	colors = colorKey(values = c(- edgen, edgen, moltenc$value), pal = color_pal)
+	colors = colors[3:length(colors)]
+	moltenp$colors = colors
+
+	nr = nrow(valuedf)
+	nc = ncol(valuedf)
+	xsc = (1:nc)/nc
+	ysc = (1:nr)/nr
+
+	coordf = expand.grid(1:length(unique(moltenp$func)), 1:length(unique(moltenp$variable)))
+	par(mar=c(10,0,3,6))
+	plot(coordf$Var1/max(coordf$Var1), coordf$Var2/max(coordf$Var2), cex = 0, bty = "n", xaxt = "n", yaxt = "n", xlab = NA, ylab = NA, ylim = c(0,1.45), xlim = c(-0.1, 1.1), ...)
+	#abline(h = coordf$Var2)
+	points(coordf$Var1/max(coordf$Var1), coordf$Var2/max(coordf$Var2), cex = moltenp$cexes, col = moltenp$colors, pch = 16, bty = 'n')
+	axis(1, at = unique(coordf$Var1)/max(coordf$Var1), labels = colnames(valuedf) , las = 2, cex.axis = 0.9)
+	axis(4, at = unique(coordf$Var2)/max(coordf$Var2), labels = rownames(valuedf), las = 2, cex.axis = 0.7)
+
+
+	rect_series = seq(0.05, 0.4, length.out = length(color_pal) + 1)
+	
+	for(q in 1:length(color_pal)) 
+		{
+			rect(xleft = rect_series[q], ybottom = 1.2, xright = rect_series[q+1], ytop = 1.25, col = color_pal[q], border = NA)
+		} 
+
+	rect(xleft = 0.05, xright = 0.4, ybottom = 1.2 ,ytop = 1.25)
+
+	text(x = 0.05, y = 1.3, labels = paste("-", edgen))
+	text(x = 0.4, y = 1.3, labels = edgen)
+	text(x = 0.225, y = 1.28, pos = 3, labels = maplabel)
+
+	
+	cvec = vector()
+	for(i in 1:length(unique(moltenp$cexes)))
+	{
+		cvec[i] <- pcex[which(pcex$cexes == unique(pcex$cexes)[i])[length(which(pcex$cexes == unique(pcex$cexes)[i]))],1]	
+	}
+	cvec = cvec[1:(length(cvec)-1)]
+	cxvec = c("p > 0.05", paste("p <=", rev(formatC(cvec, format = "e", digits = 2))))
+
+
+	point_series = seq(0.6, 1, length.out = length(unique(moltenp$cex)))
+
+	for(i in 1:length(point_series)) points(y = 1.25, x = point_series[i], cex = unique(moltenp$cex)[order(unique(moltenp$cex))][i], pch = 16, col = "gray")
+
+	text(x = point_series, y = rep(1.3, length(point_series)), labels = cxvec, cex = 0.7, srt = 45, pos = 4)
+
+}
+
+
+```
+Let's now apply the function to our simulated correlations and p values:
+
+```{r,fig.width=10, fig.height=10, dpi = 100 }
+bubbleMap(cors, pvals, color_pal = viridis(25, option = "D"), main = "A bubblemap!")
+
+```
+
+ <br>
+ <a href = #top>Back to top</a>
+ <br>
+ <a href = "https://gdagstn.github.io">Back to the index page.</a>
+ <br>

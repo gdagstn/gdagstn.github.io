@@ -1,0 +1,30 @@
+---
+title: "File index"
+author: Giuseppe D'Agostino
+output:
+    html_document:
+        theme: 'cosmo'
+        highlight: 'tango'
+        df_print: paged
+---
+
+Here are some files to showcase dataviz/illustration work.
+
+#Illustration/dataviz portfolio
+A 33 MB <a href = "https://drive.google.com/open?id=1jS6JP0DY28Tx7Qbjo5eJ7dGV1EwZgbpb" target="_blank">pdf</a> hosted on Google Drive. 
+
+#Brainmaps function in R
+A <a href = "https://gdagstn.github.io/brainmaps.html" target="_blank">tool</a> to visualize genes measured in a publicly available gene expression dataset (GTEx) in brain regions. 
+
+#Bubblemap in R
+A <a href = "https://gdagstn.github.io/bubblemap.html" target="_blank">set of functions</a> to draw bubble charts in a heatmap format 
+
+#Palette tools in R
+A <a href = "https://gdagstn.github.io/palette_tools.html" target="_blank">set of functions</a> to test color palettes for perceptuality and in different use cases, and generate qualitative palettes by clustering in colorspace
+
+#tSNE coloring in R
+A <a href = "https://gdagstn.github.io/tsnecolors.html" target="_blank">set of functions</a> to find optimal solutions to assign colors to clusters in a 2D plot such as a t-SNE plot
+
+#Degenerative art in R
+Some <a href = "https://gdagstn.github.io/degenerative.html" target="_blank">attempts</a> at creating "algorithmic art", or generative art, using random plotting with regular elements, or regular plotting with random elements. 
+

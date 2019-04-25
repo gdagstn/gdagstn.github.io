@@ -1,0 +1,168 @@
+---
+title: "Brainmaps v1.0"
+author: Giuseppe D'Agostino
+output:
+    html_document:
+        toc: false
+        theme: 'cosmo'
+        highlight: 'tango'
+        code_folding: show
+        df_print: paged
+---
+ <br>
+ <a href = "https://gdagstn.github.io/fileindex.html">Back to the index page.</a>
+ <br>
+This tool uses GTEx median TPM (transcript per million) data from postmortem brains, downloaded from the GTEx portal <a href= "https://gtexportal.org/home/" target = "_blank">website</a>, to paint a single-gene heatmap in an anatomically correct brain shape.  
+If you are going to make your own SVG file, you must first convert it to a Cairo-like format. This requires the `grConvert` package, which in turn requires the `Cairo` graphic library to be installed on your computer. This is a painful install, so I will provide you with the already-converted SVG file. 
+<br>
+The citations for GTEx are many and can be found at this <a href = "https://gtexportal.org/home/publicationsPage" target = "_blank">link</a>. 
+<br>
+However, it may be fair to cite here the Nature genetics 2013 publication signed by the whole consortium:
+<br>
+The GTEx consortium, <i>The Genotype Tissue Expression (GTEx) project</i> Nat Genet. 2013 Jun; 45(6): 580–585.
+<br>
+
+
+```{r }
+require(grImport2)
+require(viridis)
+require(pheatmap)
+require(grid)
+
+```
+
+ <br>
+Load the GTEx median TPM matrix and format it in order to retain only brain tissue information
+ <br>
+
+```{r }
+gtex <- read.delim("GTEx_Analysis_2016-01-15_v7_RNASeQCv1.1.8_gene_median_tpm.gct", header=T)
+braincols <- grep("Brain", colnames(gtex))
+gtex_brain<- gtex[,c(1,2,braincols)]
+rownames(gtex_brain) <- gtex$gene_id
+
+```
+
+ <br>
+We take the cerebellum out because most of the NDD (NeuroDevelopmental Disorders) genes are highly expressed preferentially in the cerebellum, thus masking the distribution in the other areas. We then change column names in order to make them easier to read.
+ <br>
+
+```{r }
+gtex_brain_filtered <- gtex_brain[,c(1:5,8:13,15)]
+colnames(gtex_brain_filtered)[3:12] <- gsub("Brain...", "", colnames(gtex_brain_filtered)[3:12])
+colnames(gtex_brain_filtered)[3:12] <- gsub("[.]", " ", colnames(gtex_brain_filtered)[3:12])
+colnames(gtex_brain_filtered)[3:12] <- gsub("  ", " ", colnames(gtex_brain_filtered)[3:12])
+
+```
+
+ <br>
+Read the SVG file in R
+ <br>
+
+```{r }
+nubrain <- readPicture("brain_new2.svg")
+
+```
+
+This is the original SVG file, imported in R:
+
+```{r,fig.width=10, fig.height=10, dpi = 100 }
+grid.picture(nubrain)
+
+```
+
+
+This is how areas are indexed in the SVG: <br>
+ <li>1: hypothalamus</li>
+ <li>2: amygdala</li>
+ <li>3: substantia nigra</li>
+ <li>4: hippocampus</li>
+ <li>5: cortex</li>
+ <li>6: corpus callosum 1</li>
+ <li>7: corpus callosum 2</li>
+ <li>8: caudate</li>
+ <li>9: putamen</li>
+ <li>10: nucleus accumbens</li>
+ <li>11: frontal cortex BA9</li>
+ <li>12: Anterior cingulate cortex BA24</li>
+ <li>13: Cerebellum</li>
+ <li>14: Outer shape and labels</li>
+ 
+We know this because it is how they were ordered in the original SVG file before conversion.
+ <br>
+We create a simple function to paint the brainmap, which uses the `viridis` palettes. These palettes exist in 4 schemes, or options: A, B, C and D.
+This function first generates a heatmap colorkey using functions borrowed from `pheatmap`, then applies these colors to the areas in the SVG file.
+grImport2 imports the SVG file as an S4 object, which can be accessed directly with the "@" operator in its slots. A simple loop changes the slot colors by looking them up in the mapped color key.
+
+
+```{r }
+#' Brainmap to visualize GTEx TPM profiles at the gene level
+#' @param gene gene of interest (HGNC symbol)
+#' @param option a character among A, B, C and D indicating the viridis color scheme
+#' @return a pretty brain-shaped heatmap
+
+brainmap <- function(gene, option="C"){
+genetpm <- as.numeric(gtex_brain_filtered[which(gtex_brain_filtered$Description == gene),c(3:12)])
+gene_sc <- scale(genetpm)
+pal = viridis(10, option=option)
+bks <- pheatmap:::generate_breaks(gene_sc[,1], length(pal), center = F)
+cols <- pheatmap:::scale_colours(gene_sc[,1], col=pal, breaks=bks, na_col = "gray")
+cols <- as.data.frame(cols, stringsAsFactors=F)
+cols$struct <- colnames(gtex_brain_filtered)[3:12]
+cols$index <- c(2,12,8,5,11,4,1,10,9,3)
+cols$tpm <- genetpm
+tpmord <- cols[order(cols$tpm),4]
+for (i in cols$index) nubrain@content[[1]]@content[[i]]@gp$fill = cols[which(cols$index == i), 1]
+grid.picture(nubrain)
+grid.text(gene, y = 0.75, gp = gpar(fontface=4))
+colorkey(pal, tpmord)
+}
+
+```
+
+ <br>
+We also create a handy function to make a key that shows how colors were mapped to values, as in a heatmap.
+ <br>
+
+```{r }
+#' Color key
+#' Generates a color key inside a plot
+#' @param colkey a character vector of colors
+#' @param values a numeric vector of values
+#' @return a rectangle-shaped color key with minimum, mean and maximum values
+
+colorkey <- function(colkey, values)
+{
+	heights <- rev(seq(0.35, 0.65, by=0.03))
+	for(i in 1:10) 
+		{
+			grid.rect(x=0.75, y=heights[i], width=0.03, height=0.03, gp=gpar(col=NA, fill=rev(colkey)[i]), draw = T)
+		}
+	for (i in c(10,5,1)) grid.text(x=0.78, y=heights[i], label=round(rev(values)[i],2), just="left")
+	grid.text(x=0.81, y=0.69, label="TPM")
+}
+
+```
+
+ <br>
+We can now use the `brainmap` function to draw heatmaps for any gene in the GTEX TPM matrix:
+ <br>
+
+```{r,fig.width=10, fig.height=10, dpi = 100}
+brainmap("GTF2I")
+```
+
+```{r,fig.width=10, fig.height=10, dpi = 100}
+brainmap("EIF4H", option = "B")
+```
+
+```{r,fig.width=10, fig.height=10, dpi = 100}
+brainmap("GAPDH", option = "D")
+```
+
+ <br>
+ <a href = #top>Back to top</a>
+ <br>
+ <a href = "https://gdagstn.github.io/fileindex.html">Back to the index page.</a>
+ <br>
+

@@ -1,0 +1,1021 @@
+---
+title: "tSNE coloring v1.0"
+author: Giuseppe D'Agostino
+output:
+    html_document:
+        toc: true
+        toc_float: true
+        theme: 'cosmo'
+        highlight: 'tango'
+        code_folding: show
+        df_print: paged
+---
+
+ <br>
+ <a href = "https://gdagstn.github.io/index.html">Back to the index page.</a>
+ <br>
+
+# Intro
+
+Now that we have developed several ways to create categorical palettes, we can appreciate how many times different clusterings on different colorspaces create similar colors.
+If the colors are too similar, the palette should be modified (e.g. rotating, or choosing a different colorspace), but if they are similar but still distinguishable, they can still be used. However, in a 2D map such as a tSNE plot, similar clusters of dots may be assigned similar colors, making their interpretation more difficult.
+The issue is a "map colouring" issue, with the different constraint of using every colour once. I have attempted at giving a solution combining two closely related fields: graph theory and computational geometry.
+
+# Colouring a tSNE with separate colors
+
+The solution that I propose is not at all elegant, but seems to do the job. 
+It consists of several steps:
+<br>
+<ol> 
+<li>Find cluster centroids</li>
+<li>Connect them by Delauney triangulation, obtaining an undirected graph</li>
+<li>Calculate distances on Delauney triangulation edges only</li>
+<li>Input the graph with the distances as weights into a Bellman-Ford shortest path algorithm in order to find the most connected centroid, i.e. the centroid with most points in its vicinity </li>
+<li>Start from the most connected centroid and order all the other points in terms of Euclidean distance from this centroid, assign it a the first color of the palette</li>
+<li>Order the other colors by DeltaE 2000 distance to the first color on the Lab space, which is the "perceivable" difference </li>
+<li>Assign most distinct colors to points closest to the most connected centroid</li>
+<li>Check pairwise distance on colors that share a Voronoi edge</li>
+<li>Back to 7), using the second color</li>
+<li>Take the starting color that has the maximum minimum distance between all shared Voronoi edges</li>
+</ol>
+<br>
+
+I will illustrate the procedure step by step.
+
+## 1: Find cluster centroids in the tSNE
+
+This was done in the palette tools page, and is quite simple. The number of clusters is for convenience the number of colors in the palette. We will use the CLARA RGB palette for this, which has 8 colors. We label each centroid on the plot with the corresponding cluster number.
+
+
+```{r, fig.width = 7, fig.height = 7, fig.align = "center"}
+library(viridis)
+library(colorspace)
+library(optrees)
+library(deldir)
+library(alphahull)
+
+getCenter <- function(o)
+{
+	xy = 1:2
+	xy[1] = mean(o[,1])
+	xy[2] = mean(o[,2])
+	return(xy)
+}
+
+tmp = dist(tsne)
+	hc = hclust(tmp)
+	cutt = cutree(hc, k = 8)
+	dat = as.data.frame(cbind(tsne,cutt))	#Add the clustering assignment to the tSNE coordinates
+
+	plot(dat[,1], dat[,2], col = "gray", pch = 16, xlab = "tSNE 1", ylab = "tSNE 2")
+	centers = matrix(0, nrow = 8, ncol = 2)
+	for(i in unique(cutt)) centers[i,] = getCenter(tsne[cutt == i,])
+	points(centers[,1], centers[,2], cex = 3, pch = 21, bg = "white")
+	text(centers[,1], centers[,2], labels = 1:8, font = 2)
+
+
+claram = cluster::clara(mm[,1:3], k = 8) #The syntax of clara is the same as k-means
+	claram = claram$medoids #Take medoids from the clara object
+	clcols = vector()
+	for(i in 1:8)	
+		{
+			clcols[i] <- mm[which(mm[,3] == claram[i,1] & mm[,1] == claram[i,2] & mm[,2] == claram[i,3]),4]
+		}
+		set.seed(10)
+	clcols = clcols[sample(1:length(clcols), length(clcols))]
+
+```
+
+## 2: Connect centroids by Delauney triangulation
+
+The <a href = "https://en.wikipedia.org/wiki/Delaunay_triangulation" target = "_blank">Delauney triangulation</a> of a set of points connects points in such a way that no point in this set is inside the circumcircle of any triangle of the triangulation. 
+Another interesting property is that it contains the Euclidean minimum spanning tree of the set of points. 
+Thus the Delauney triangulation of a set of points won't connect all of them to each other, but will create enough edges that a shortest path to visit all of them can be found, and points close in space will be connected more likely than those farther away.
+In practical terms it is a way of reducing the set of distances to be calculated, so that the computation of the shortest path can be quick and find easily the most connected centerpoints. 
+We will compute the triangulation using the `deldir` package by Rolf Turner (<a href="https://cran.r-project.org/web/packages/deldir/", target="_blank">CRAN page</a>).
+
+```{r, fig.width = 7, fig.height = 7, fig.align = "center"}
+vtess <- deldir::deldir(centers[,1], centers[,2], rw = c(range(dat[,1]), range(dat[,2])))
+	plot(dat[,1], dat[,2], col = "gray", pch = 16, xlab = "tSNE 1", ylab = "tSNE 2")
+	plot(vtess, wlines="triang", wpoints="dummy", number=FALSE, add=TRUE, lty=1, col = "black")
+	points(centers[,1], centers[,2], cex = 3, pch = 21, bg = "white")
+	text(centers[,1], centers[,2], labels = 1:8, font = 2)
+```
+
+We then calculate pairwise distances among all points, but only retain those in the nodes connected by the Delauney triangulation. Then we create a matrix that is suitable for shortest path calculation.
+
+```{r}
+dat.tmp = centers
+dist.tmp = dist(dat.tmp)
+
+tri <- vtess$delsgs
+tri$dist = tri$ind1
+for(i in 1:nrow(tri)) 
+	{	
+		tri$dist[i] = as.matrix(dist.tmp)[tri$ind1[i], tri$ind2[i]]
+	}
+arcs = tri[,5:7]
+colnames(arcs) = c("source", "target", "weight")
+arcs = as.matrix(arcs)
+```
+
+
+## 3: Compute shortest path from each node, choose the best one
+
+Now we apply the <a href = "https://en.wikipedia.org/wiki/Bellman%E2%80%93Ford_algorithm" target = "_blank">Bellman-Ford</a> shortest path algorithm on the Delauney graph, identifying the shortest path to all the other nodes starting from each node. The weights are the Euclidean distances between the edges. We use the `optrees` package, by Manuel Fontenla (<a href = "https://cran.r-project.org/web/packages/optrees/", target="_blank">CRAN page</a>) to perform this search.
+
+```{r}
+
+BF_dists = list()
+dists = vector()
+		for(k in 1:max(unique(cutt))) 
+			{
+				BF_dists[[k]] = optrees::getShortestPathTree(1:max(unique(cutt)), arcs, source.node = k, algorithm = "Bellman-Ford", directed = F, show.data = F, show.graph = F, show.distances = F)
+				dists[k] = sum(BF_dists[[k]]$distances) 
+			}
+
+```
+
+The dists vector contains the sum of distances walked in the calculation of the shortest path for each node, so we want to take the node with the smallest distance walked:
+
+```{r}
+initial = which(dists == min(dists))
+```
+## 4: Start with a random color, then add most distant color to closest nodes
+
+We will begin from centroid number 6, using a random color from our palette:
+
+```{r, fig.width = 7, fig.height = 7, fig.align = "center"}
+set.seed(82)
+colordf = data.frame(1:8, rep("gray", 8), stringsAsFactors =  F)
+colnames(colordf) = c("cluster", "color")
+colordf[initial, 2] = sample(clcols, 1)
+plot(dat[,1], dat[,2], col = colordf[dat[,3],2], pch = 16, xlab = "tSNE 1", ylab = "tSNE 2")
+```
+
+We then need to go by closest to most distant centroid:
+
+```{r}
+nextcols = as.numeric(names(as.matrix(dist.tmp)[initial,][order(as.matrix(dist.tmp)[initial,])][2:ncol(as.matrix(dist.tmp))]))
+nextcols
+```
+And to these centroids we assign colors in order of $\Delta$E, the "perceived difference" in colors. Two colors with a $\Delta$E below 2.3 are impossible to distinguish by the human eye.
+
+```{r}
+dist_to_initial = vector()
+for(i in 1:length(clcols)) dist_to_initial[i] = colorscience::deltaE2000(grDevices::convertColor(colorspace::hex2RGB(colordf[initial, 2])@coords, from = "sRGB", to = "Lab"), grDevices::convertColor(colorspace::hex2RGB(clcols[i])@coords, from = "sRGB", to = "Lab")
+)
+	
+
+	names(dist_to_initial) = clcols
+dist_to_initial = dist_to_initial[order(dist_to_initial, decreasing = T)]
+dist_to_initial = dist_to_initial[1:(length(dist_to_initial)-1)]
+colordf[nextcols,2] = names(dist_to_initial)
+```
+
+We can now colour our tSNE plot with a qualitative palette in order to highlight clusters that are close on the plot:
+
+```{r, fig.width = 7, fig.height = 7, fig.align = "center"}
+plot(dat[,1], dat[,2], col = colordf[dat[,3],2], pch = 16, xlab = "tSNE 1", ylab = "tSNE 2")
+```
+
+##5: Check how the assignment performed using Voronoi diagrams
+
+Although distances from the starting centroid are obviously calculated on two dimensions, when we sort them we are actually flattening them in one dimension. This means that even though two centroids (e.g. centroids 2 and 7) are not immediately one after the other in terms of distance from centroid 6, they are close together in space. We want to see how distinctive this color assignment is in terms of color distance.
+Since we already computed the Delauney triangulation for this set of points, we can join the centers of the circumcircles in which each Delauney triangle is inscribed, thus obtaining the <a href = "https://en.wikipedia.org/wiki/Voronoi_diagram" target = "_blank">Voronoi diagram</a> for the centroids. We can see that there is a good agreement between the Voronoi cells and the actual clusters:
+
+```{r, fig.width = 7, fig.height = 7, fig.align = "center"}
+vtiles = tile.list(vtess)
+plot(vtiles, fill = colordf$color)
+points(dat[,1], dat[,2], col = "black", bg =  colordf[dat[,3],2], pch = 21, xlab = NA, ylab = NA, cex = 0.7)
+
+points(centers[,1], centers[,2], cex = 3, pch = 21, bg = "white")
+text(centers[,1], centers[,2], labels = 1:8, font = 2)
+
+
+```
+
+If two Voronoi tessels share an edge, they are adjacent in space (see note in the Future directions section for some artifacts), and as we saw earlier it is a good approximation for clusters being adjacent to each other. To find shared edges we will use the `spatstat` package, by Adrian Baddeley, Rolf Turner and Ege Rubak (<a href = "https://cran.r-project.org/web/packages/spatstat/", target="_blank">CRAN page</a>) and a function found on this <a href = "https://stackoverflow.com/questions/24317733/table-of-shared-edges-for-a-voronoi-tesslleation" target = "_blank">answer</a> on Stack Overflow.
+
+
+```{r}
+library(spatstat)
+
+cps <- ppp(centers[,1], centers[,2],window=owin(range(dat[,1]), range(dat[,2])))
+
+sharededge <- function(X) {
+   verifyclass(X, "ppp")
+   Y <- X[as.rectangle(X)]
+   dX <- deldir(Y)
+   DS <- dX$dirsgs
+   xyxy <- DS[,1:4]
+   names(xyxy) <- c("x0","y0","x1","y1")
+   sX <- as.psp(xyxy,window=dX$rw)
+   marks(sX) <- 1:nobjects(sX)
+   sX <- sX[as.owin(X)]
+   tX <- tapply(lengths.psp(sX), marks(sX), sum)
+   jj <- as.integer(names(tX))
+   ans <- data.frame(ind1=DS[jj,5], 
+                     ind2=DS[jj,6], 
+                     leng=as.numeric(tX))
+   return(ans)
+}
+
+shared_edge_lengths <- sharededge(cps)
+```
+
+We now check which colors are within each shared edge, and their $\Delta$E distances:
+
+```{r}
+edgecolors = shared_edge_lengths
+edgecolors$col1 = colordf[edgecolors$ind1,2]
+edgecolors$col2 = colordf[edgecolors$ind2,2]
+edgecolors$DeltaE.dist = apply(edgecolors, 1, 
+	function (x) colorscience::deltaE2000(grDevices::convertColor(colorspace::hex2RGB(x[4])@coords, from = "sRGB", to = "Lab"), grDevices::convertColor(colorspace::hex2RGB(x[5])@coords, from = "sRGB", to = "Lab")))
+```
+
+By plotting all  $\Delta$E distances we see which two adjacent tessels have the lowest $\Delta$E. For this palette and with this combination the distance values are not always optimal (defining "optimal" as above the arbitrary threshold of 20), but are always fairly distinguishable:
+
+```{r, fig.width = 7, fig.height = 7, fig.align = "center"}
+plot(1:nrow(edgecolors), rep(0, nrow(edgecolors)), cex = 0, ylim = c(-1, max(edgecolors$DeltaE.dist)+10), xaxt = "n", xlab = NA, ylab = "DeltaE color distance")
+
+segments(x0 = 1:nrow(edgecolors), y0 = rep(0, nrow(edgecolors)), x1 = 1:nrow(edgecolors), y1 =edgecolors$DeltaE.dist)
+points(1:nrow(edgecolors), rep(0, nrow(edgecolors)), cex = 4, pch = 15, col = edgecolors$col1)
+
+points(1:nrow(edgecolors), edgecolors$DeltaE.dist, cex = 4, pch = 15, col = edgecolors$col2)
+#bpl = barplot(edgecolors$DeltaE.dist, plot = F)
+axis(1, at = 1:nrow(edgecolors), labels = paste(edgecolors$ind1, edgecolors$ind2, sep = "-"), las = 2)
+```
+
+
+We can also check all possible distances to have a sense of how much better this procedure was:
+
+
+```{r, fig.width = 15, fig.height = 7, fig.align = "center"}
+distpairs = expand.grid(1:8, 1:8)
+distpairs$Col1 = colordf[distpairs$Var1,2]
+distpairs$Col2 = colordf[distpairs$Var2,2]
+distpairs$DeltaE.dist = apply(distpairs[,1:2], 1, 
+	function (x) colorscience::deltaE2000(grDevices::convertColor(colorspace::hex2RGB(colordf[x[1],2])@coords, from = "sRGB", to = "Lab"), grDevices::convertColor(colorspace::hex2RGB(colordf[x[2],2])@coords, from = "sRGB", to = "Lab")))
+
+plot(1:nrow(distpairs), rep(0, nrow(distpairs)), cex = 0, ylim = c(-1, max(distpairs$DeltaE.dist)+10), xaxt = "n", xlab = NA, ylab = "DeltaE color distance")
+
+segments(x0 = 1:nrow(distpairs), y0 = rep(0, nrow(distpairs)), x1 = 1:nrow(distpairs), y1 =distpairs$DeltaE.dist)
+points(1:nrow(distpairs), rep(0, nrow(distpairs)), cex = 2, pch = 15, col = distpairs$Col1)
+
+points(1:nrow(distpairs), distpairs$DeltaE.dist, cex = 2, pch = 15, col = distpairs$Col2)
+axis(1, at = 1:nrow(distpairs), labels = paste(distpairs$Var1, distpairs$Var2, sep = "-"), las = 2)
+```
+
+Can we do better?
+
+##6: Cycle through all the colors to find the optimal starting point
+
+It is important to note that had we started with a different color in the most connected centroid, we would have generated a different order of colours, maybe maximizing the distances between shared edges. 
+So the next logical step in this procedure is to generate an assignment for every color in the starting point, look at the distribution of color distances, and choose the assignment with the highest number of large distances:
+
+```{r, fig.width = 7, fig.height = 7, fig.align = "center"}
+colorassignments = list()
+listcolordf = list()
+for(j in 1:length(clcols))
+{	
+	colordf = data.frame(1:length(clcols), rep("gray", length(clcols)), stringsAsFactors =  F)
+	colordf[initial, 2] = clcols[j]
+	dist_to_initial = vector()
+	for(i in 1:length(clcols)) 
+		{
+			dist_to_initial[i] = colorscience::deltaE2000(grDevices::convertColor(colorspace::hex2RGB(colordf[initial, 2])@coords, from = "sRGB", to = "Lab"), grDevices::convertColor(colorspace::hex2RGB(clcols[i])@coords, from = "sRGB", to = "Lab"))
+		}
+	names(dist_to_initial) = clcols
+	dist_to_initial = dist_to_initial[order(dist_to_initial, decreasing = T)]
+	dist_to_initial = dist_to_initial[1:(length(dist_to_initial)-1)]
+	colordf[nextcols,2] = names(dist_to_initial)
+	edgecolors = shared_edge_lengths
+	edgecolors$col1 = colordf[edgecolors$ind1,2]
+	edgecolors$col2 = colordf[edgecolors$ind2,2]
+	edgecolors$DeltaE.dist = apply(edgecolors, 1, 
+	function (x) colorscience::deltaE2000(grDevices::convertColor(colorspace::hex2RGB(x[4])@coords, from = "sRGB", to = "Lab"), grDevices::convertColor(colorspace::hex2RGB(x[5])@coords, from = "sRGB", to = "Lab")))
+	colorassignments[[j]] = edgecolors
+	listcolordf[[j]] = colordf
+}
+mindists = unlist(lapply(colorassignments, function (x) min(x$DeltaE.dist[x$DeltaE.dist > 0])))
+
+best.assignment = which(mindists == max(mindists))
+if(length(best.assignment) > 1) best.assignment = best.assignment[1]
+
+best.colordf = listcolordf[[best.assignment]]
+
+plot(dat[,1], dat[,2], col = best.colordf[dat[,3],2], pch = 16, xlab = "tSNE 1", ylab = "tSNE 2")
+points(centers[,1], centers[,2], cex = 3, pch = 21, bg = "white")
+text(centers[,1], centers[,2], labels = 1:length(clcols), font = 2)
+```
+
+And their distances, with an arbitrary threshold of 20 for distinguishability:
+
+```{r, fig.width = 15, fig.height = 7, fig.align = "center"}
+
+plot(1:nrow(colorassignments[[best.assignment]]), rep(0, nrow(colorassignments[[best.assignment]])), cex = 0, ylim = c(-1, max(colorassignments[[best.assignment]]$DeltaE.dist)+10), xaxt = "n", xlab = NA, ylab = "DeltaE color distance")
+segments(x0 = 1:nrow(colorassignments[[best.assignment]]), y0 = rep(0, nrow(colorassignments[[best.assignment]])), x1 = 1:nrow(colorassignments[[best.assignment]]), y1 =colorassignments[[best.assignment]]$DeltaE.dist)
+points(1:nrow(colorassignments[[best.assignment]]), rep(0, nrow(colorassignments[[best.assignment]])), cex = 4, pch = 15, col = colorassignments[[best.assignment]]$col1)
+
+points(1:nrow(colorassignments[[best.assignment]]), colorassignments[[best.assignment]]$DeltaE.dist, cex = 4, pch = 15, col = colorassignments[[best.assignment]]$col2)
+#bpl = barplot(edgecolors$DeltaE.dist, plot = F)
+axis(1, at = 1:nrow(colorassignments[[best.assignment]]), labels = paste(colorassignments[[best.assignment]]$ind1, colorassignments[[best.assignment]]$ind2, sep = "-"), las = 2)
+abline(h = 20, lty = 2, lwd = 0.4)
+
+```
+
+Now we package everything in a function:
+
+```{r}
+colorTSNE <- function(tsnecoords, palette, output.type = "tsneplot")
+{	
+	####This will be removed when the input is a tSNEplot with its own clustering!!!
+	tmp = dist(tsnecoords)
+	hc = hclust(tmp)
+	cutt = cutree(hc, k = length(palette))
+	dat = as.data.frame(cbind(tsnecoords,cutt))	#Add the clustering assignment to the tSNE coordinates
+	#####
+	
+	centers = matrix(0, nrow = length(palette), ncol = 2)
+	for(i in unique(cutt)) 
+		{
+			centers[i,] = getCenter(tsne[cutt == i,])
+		}
+	#First step: Delauney triangulation and Voronoi tessellation
+	vtess <- deldir(centers[,1], centers[,2], rw = c(range(dat[,1]), range(dat[,2])))
+	
+	dist.tmp = dist(centers)
+
+	tri <- vtess$delsgs
+	tri$dist = tri$ind1
+	for(i in 1:nrow(tri)) 
+	{	
+		tri$dist[i] = as.matrix(dist.tmp)[tri$ind1[i], tri$ind2[i]]
+	}
+	arcs = as.matrix(tri[,5:7])
+
+	#Second step: Bellman-Ford shortest path calculation
+	BF_dists = list()
+	dists = vector()
+		for(k in 1:max(unique(cutt))) 
+			{
+				BF_dists[[k]] = getShortestPathTree(1:max(unique(cutt)), arcs, source.node = k, algorithm = "Bellman-Ford", directed = F, show.data = F, show.graph = F, show.distances = F)
+				dists[k] = sum(BF_dists[[k]]$distances) 
+			}
+	initial = which(dists == min(dists))
+
+	#Third step: cycle through all the colors and check the pairwise distance between Voronoi cells with shared edges choosing the best starting color
+	nextcols = as.numeric(names(as.matrix(dist.tmp)[initial,][order(as.matrix(dist.tmp)[initial,])][2:ncol(as.matrix(dist.tmp))]))
+	cps <- ppp(centers[,1], centers[,2],window=owin(range(dat[,1]), range(dat[,2])))
+	shared_edge_lengths <- sharededge(cps)
+	colorassignments = list()
+	listcolordf = list()
+	for(j in 1:length(palette))
+		{	
+	colordf = data.frame(1:length(palette), rep("gray", length(palette)), stringsAsFactors =  F)
+	colordf[initial, 2] = palette[j]
+	dist_to_initial = vector()
+		for(i in 1:length(palette)) 
+			{
+				dist_to_initial[i] = colorscience::deltaE2000(grDevices::convertColor(colorspace::hex2RGB(colordf[initial, 2])@coords, from = "sRGB", to = "Lab"), grDevices::convertColor(colorspace::hex2RGB(palette[i])@coords, from = "sRGB", to = "Lab"))
+			}
+		names(dist_to_initial) = palette
+		dist_to_initial = dist_to_initial[order(dist_to_initial, decreasing = T)]
+		dist_to_initial = dist_to_initial[1:(length(dist_to_initial)-1)]
+		colordf[nextcols,2] = names(dist_to_initial)
+		edgecolors = shared_edge_lengths
+		edgecolors$col1 = colordf[edgecolors$ind1,2]
+		edgecolors$col2 = colordf[edgecolors$ind2,2]
+		edgecolors$DeltaE.dist = apply(edgecolors, 1, 
+		function (x) colorscience::deltaE2000(grDevices::convertColor(colorspace::hex2RGB(x[4])@coords, from = "sRGB", to = "Lab"), grDevices::convertColor(colorspace::hex2RGB(x[5])@coords, from = "sRGB", to = "Lab")))
+		colorassignments[[j]] = edgecolors
+		listcolordf[[j]] = colordf
+		}
+	
+	mindists = unlist(lapply(colorassignments, function (x) min(x$DeltaE.dist[x$DeltaE.dist > 0])))
+	best.assignment = which(mindists == max(mindists))
+
+	if(length(best.assignment) > 1) best.assignment = best.assignment[1]
+	best.colordf = listcolordf[[best.assignment]]
+	colnames(best.colordf) = c("cluster", "color")
+	if(output.type == "tsneplot")
+		{
+		plot(dat[,1], dat[,2], col = best.colordf[dat[,3],2], pch = 16, xlab = "tSNE 1", ylab = "tSNE 2")
+		points(centers[,1], centers[,2], cex = 3, pch = 21, bg = "white")
+		text(centers[,1], centers[,2], labels = 1:length(palette), font = 2)
+			
+		} else
+	if(output.type == "distanceplot")
+		{
+		plot(1:nrow(colorassignments[[best.assignment]]), rep(0, nrow(colorassignments[[best.assignment]])), cex = 0, ylim = c(-1, max(colorassignments[[best.assignment]]$DeltaE.dist)+10), xaxt = "n", xlab = NA, ylab = "DeltaE2000 color distance", main = "DeltaE2000 distances between adjacent cells")
+		segments(x0 = 1:nrow(colorassignments[[best.assignment]]), y0 = rep(0, nrow(colorassignments[[best.assignment]])), x1 = 1:nrow(colorassignments[[best.assignment]]), y1 =colorassignments[[best.assignment]]$DeltaE.dist)
+		points(1:nrow(colorassignments[[best.assignment]]), rep(0, nrow(colorassignments[[best.assignment]])), cex = 4, pch = 15, col = colorassignments[[best.assignment]]$col1)
+
+		points(1:nrow(colorassignments[[best.assignment]]), colorassignments[[best.assignment]]$DeltaE.dist, cex = 4, pch = 15, col = colorassignments[[best.assignment]]$col2)
+		axis(1, at = 1:nrow(colorassignments[[best.assignment]]), labels = paste(colorassignments[[best.assignment]]$ind1, colorassignments[[best.assignment]]$ind2, sep = "-"), las = 2)
+		abline(h = 20, lty = 2, lwd = 0.4)
+			
+	} else
+	if(output.type == "voronoi")
+	{
+		vtiles = tile.list(vtess)
+		plot(vtiles, fill = best.colordf$color, xlab = "tSNE 1", ylab = "tSNE 2", main = "Voronoi diagram of best color assignment")
+		points(dat[,1], dat[,2], col = "black", bg =  best.colordf[dat[,3],2], pch = 21, cex = 0.7)
+
+		points(centers[,1], centers[,2], cex = 3, pch = 21, bg = "white")
+		text(centers[,1], centers[,2], labels = 1:length(palette), font = 2)
+
+	}
+	if(output.type == "assignment")
+		return(best.colordf)
+}
+```
+
+#Limit cases
+
+##Distributing a large palette
+
+A random color assignment would have generated some color pairs that are slightly harder to distinguish. However, this difficulty increases when we increase the number of colors generated by clustering. Let's see it with 15 colors:
+
+```{r fig.width = 6, fig.height = 6, fig.align = "center"}
+claram = cluster::clara(mm[,1:3], k = 15) #The syntax of clara is the same as k-means
+	claram = claram$medoids #Take medoids from the clara object
+	clcols = vector()
+	for(i in 1:15)	
+		{
+			clcols[i] = mm[which(mm[,3] == claram[i,1] & mm[,1] == claram[i,2] & mm[,2] == claram[i,3]),4]
+		}
+tmp = dist(tsne)
+	hc = hclust(tmp)
+	cutt = cutree(hc, k = 15)
+	dat = as.data.frame(cbind(tsne,cutt))	#Add the clustering assignment to the tSNE coordinates
+
+	plot(dat[,1], dat[,2], pch = 16, xlab = "tSNE 1", ylab = "tSNE 2", col = clcols[dat[,3]])
+	centers = matrix(0, nrow = 15, ncol = 2)
+	for(i in unique(cutt)) centers[i,] = getCenter(tsne[cutt == i,])
+	points(centers[,1], centers[,2], cex = 3, pch = 21, bg = "white")
+	text(centers[,1], centers[,2], labels = 1:length(clcols), font = 2)
+```
+
+We can see how many more instances of less distinguishable couples can occur:
+
+```{r, fig.width = 15, fig.height = 7, fig.align = "center"}
+
+colordf = data.frame(1:length(clcols), clcols, stringsAsFactors = F)
+distpairs = expand.grid(1:length(clcols), 1:length(clcols))
+distpairs$Col1 = colordf[distpairs$Var1,2]
+distpairs$Col2 = colordf[distpairs$Var2,2]
+distpairs$DeltaE.dist = apply(distpairs[,1:2], 1, 
+	function (x) colorscience::deltaE2000(grDevices::convertColor(colorspace::hex2RGB(colordf[x[1],2])@coords, from = "sRGB", to = "Lab"), grDevices::convertColor(colorspace::hex2RGB(colordf[x[2],2])@coords, from = "sRGB", to = "Lab")))
+plot(1:nrow(distpairs), rep(0, nrow(distpairs)), cex = 0, ylim = c(-1, max(distpairs$DeltaE.dist)+10), xaxt = "n", xlab = NA, ylab = "DeltaE color distance")
+segments(x0 = 1:nrow(distpairs), y0 = rep(0, nrow(distpairs)), x1 = 1:nrow(distpairs), y1 =distpairs$DeltaE.dist)
+points(1:nrow(distpairs), rep(0, nrow(distpairs)), cex = 0.5, pch = 15, col = distpairs$Col1)
+points(1:nrow(distpairs), distpairs$DeltaE.dist, cex = 0.5, pch = 15, col = distpairs$Col2)
+abline(h = 20, lty = 2, lwd = 0.4)
+```
+
+Whereas using this procedure:
+
+```{r, fig.width = 6, fig.height = 6, fig.align = "center"}
+colorTSNE(tsne, clcols, output.type = "tsneplot")
+```
+
+
+The distances seem to be optimal:
+
+```{r, fig.width = 15, fig.height = 7, fig.align = "center"}
+colorTSNE(tsne, clcols, output.type = "distanceplot")
+```
+
+##Using a quantitative palette
+
+A quantitative palette such as those generated by the `viridis` package should not be used as a qualitative one, but it represents an interesting limit case due to the fact that colors are interpolated and will be similar by definition. We try using 10 colors:
+
+```{r, fig.width = 6, fig.height = 6, fig.align = "center"}
+colorTSNE(tsne, viridis(10, option = "B"), output.type = "tsneplot")
+```
+
+Distances are not so bad:
+
+```{r, fig.width = 15, fig.height = 7, fig.align = "center"}
+colorTSNE(tsne, viridis(10, option = "B"), output.type = "distanceplot")
+
+```
+
+As expected, quantitative palettes are hard to assign and should not be used for this task, but the procedure does a decent job of separating close colors.
+However, this particular set of tSNE loadings and clusters has some blurry boundaries between the center clusters and the south-west ones, which are approximated as separated in the Voronoi diagram. Thus clusters 7 and 9 have very similar colors, but their Voronoi cells should have no shared edge:
+
+```{r, fig.width = 6, fig.height = 6, fig.align = "center"}
+colorTSNE(tsne, viridis(10, option = "B"), output.type = "voronoi")
+
+```
+
+We can use more qualitative palettes e.g. from the great `qualpalr` package by Johan Larsson, which chooses colors from the DIN99 space (a perceptual colorspace in which the Euclidean distance is linear with the color distance) and applies power transformations - you can read more about it in the <a href = "https://cran.r-project.org/web/packages/qualpalr/vignettes/introduction.html" target = "_blank">vignette</a>:
+
+
+```{r, fig.width = 6, fig.height = 6, fig.align = "center"}
+qualpalette = qualpalr::qualpal(10, "pretty")
+colors = qualpalette$hex
+colorTSNE(tsne, colors, "tsneplot")
+```
+<br>
+
+As expected, distances are ok. Two pairs are more similar but the assignment is still pretty distinguishable.
+
+```{r, fig.width = 15, fig.height = 7, fig.align = "center"}
+colorTSNE(tsne, colors, output.type = "distanceplot")
+
+```
+
+
+# Refining edge detection
+
+There are still many ways to improve the algorithm, especially in its decisions on shared edges. The Voronoi diagram of a 10-color tSNE plot shows that cells 10 and 2 have a shared edge, although they are not really adjacent in space. Moreover, the "chicken drumstick" cluster on the right hand side of the plot is separated from all the others, so the Voronoi edge sharing is an artifact. One possible solution would be to identify "islands", compute the convex hull of all islands and use it as a bounding box for Voronoi cells, so that edges shared in space are real and not artefactual. Taking in consideration that the number of shared edges is less than what the Voronoi tessellation suggests can improve the assignment routine: very similar colors can be assigned to clusters that have no shared edges because they belong to two groups of points that are totally disjointed in space, i.e. they are "islands" of points. 
+
+We first identify islands by leveraging another concept from computational geometry, the convex hull. Given a set of points, its convex hull is the subset of points that encloses all the other points. If we join the convex hull of a cluster in a polygon, we get the perimeter of the polygon. This is useful to know whether two clusters are physically close in space: if their convex hull has points in common, the two clusters are very close in space.
+
+```{r, fig.width = 6, fig.height = 6, fig.align = "center"}
+chullist = list()
+for(i in 1:max(cutt))
+{	
+	new.dat = dat[dat$cutt == i,1:2]
+	chullist[[i]] = new.dat[chull(new.dat[,1], new.dat[,2]),]
+	colnames(chullist[[i]]) = c("x", "y")
+}	
+names(chullist) = 1:max(cutt)
+plot(dat[,1], dat[,2], col = "gray", pch = 16, xlab = "tSNE 1", ylab = "tSNE 2")
+for(i in names(chullist)) 
+	{
+		polygon(chullist[[i]]$x, chullist[[i]]$y)
+	}
+```
+
+However, it may be that clusters are physically close, but their convex hull is still not overlapping. For this reason we can think of scaling the convex hull by a little, in order to maximize the possibility of overlap between close clusters, without overlapping with those farther away. 
+For this reason we write a simple function to scale a convex hull around its center, and we overlay it to the original convex hulls with various scaling factors:
+
+```{r, fig.width = 6, fig.height = 6, fig.align = "center"}
+polyscale = function(polygon.coords, scalefactor)
+{	
+	cc1 = getCenter(polygon.coords)
+	scalematrix = matrix(c(scalefactor, rep(0,3), scalefactor, rep(0,3), 1), nrow = 3)
+	new.poly = t(apply(polygon.coords, 1, function (x) c(x,1) %*% scalematrix))[,1:2]
+	cc2 = getCenter(new.poly)
+	
+	new.poly[,1] = new.poly[,1] - (cc2[1]-cc1[1])
+	new.poly[,2] = new.poly[,2] -(cc2[2]-cc1[2])
+	colnames(new.poly) = c("x", "y")
+	return(new.poly)
+}
+
+plot(dat[,1], dat[,2], col = "gray", pch = 16, main = "Convex hull overlap at various scaling factors", xlab = "tSNE 1", ylab = "tSNE 2")
+
+for(i in names(chullist)) 
+	{
+		polygon(chullist[[i]]$x, chullist[[i]]$y)
+		polygon(polyscale(chullist[[i]], 1.1)[,1], polyscale(chullist[[i]],1.1)[,2], border = viridis(6, option = "D")[1])
+		polygon(polyscale(chullist[[i]], 1.2)[,1], polyscale(chullist[[i]],1.2)[,2], border =  viridis(6, option = "D")[2])
+		polygon(polyscale(chullist[[i]], 1.3)[,1], polyscale(chullist[[i]],1.3)[,2], border =  viridis(6, option = "D")[3])
+		polygon(polyscale(chullist[[i]], 1.4)[,1], polyscale(chullist[[i]],1.4)[,2], border =  viridis(6, option = "D")[4])
+
+	}
+
+legend("topright", bty = "n", col = viridis(6, option = "D")[1:4], lwd = 1, legend = c("1.1", "1.2", "1.3", "1.4"))
+points(centers[,1], centers[,2], cex = 3, pch = 21, bg = "white")
+text(centers[,1], centers[,2], labels = 1:length(clcols), font = 2)
+```
+You can see that a 1.4 scaling factor recovers the vicinity of clusters 9 and 13. This system could also be an easy alternative to the use of Voronoi diagrams to find shared edges.
+
+## Identifying islands
+
+We need to define a process that will tell us whether two hulls overlap. This cannot be achieved using simply the `inout` function, because it will only check the coordinates of each vertex. If a hull has no vertices inside another hull, but they still overlap, the `inout` function will return the seemingly paradoxical result of no overlap.
+A simple solution may be that of creating a matrix containing additional points (with a reasonable step) between each vertex of a hull, and checking for their oberlap with the other hull.
+
+```{r, fig.width = 6, fig.height = 6, fig.align = "center"}
+chullist.scaled = lapply(chullist, function(x) cbind(polyscale(x, 1.4)[,1], polyscale(x, 1.4)[,2]))
+
+addPoints <- function(polygon.coords, steps = 4)
+{
+	new.coords = polygon.coords[1,]
+
+	for(i in 1:(nrow(polygon.coords)-1)) 
+	{	
+
+		new.x = seq(polygon.coords[i,1], polygon.coords[i+1,1], length.out = steps)
+		new.y = seq(polygon.coords[i,2], polygon.coords[i+1,2], length.out = steps)
+		new.xy = cbind(new.x, new.y)
+		tmp.coords = polygon.coords[i,]
+		new.coords = rbind(new.coords, tmp.coords, new.xy)
+	}
+	new.x.last = seq(polygon.coords[nrow(polygon.coords),1], polygon.coords[1,1], length.out = steps)
+	new.y.last = seq(polygon.coords[nrow(polygon.coords),2], polygon.coords[1,2], length.out = steps)
+	new.xy.last = cbind(new.x.last, new.y.last)
+	new.coords = rbind(new.coords, new.xy.last)
+	new.coords = new.coords[2:nrow(new.coords),]
+	rownames(new.coords) = NULL
+	return(new.coords)
+}
+
+plot(dat[,1], dat[,2], col = "gray", pch = 16, main = "Example of addPoints result", xlab = "tSNE 1", ylab = "tSNE 2")
+polygon(chullist.scaled[[5]][,1], chullist.scaled[[5]][,2])
+points(addPoints(chullist.scaled[[5]])[,1], addPoints(chullist.scaled[[5]])[,2], pch = 21, bg = "white", cex = 0.6)
+
+```
+
+We can then make all convex hull coordinates "denser" by applying the addPoints function, thus making overlap detection using `inout` easier:
+
+```{r}
+chullist.dense = lapply(chullist.scaled, function(x) addPoints(x, 10))
+inouts = data.frame(expand.grid(1:max(cutt), 1:max(cutt)))
+overlapping.dots = apply(inouts, 1, function(x) splancs::inout(chullist.dense[[x[1]]], chullist.dense[[x[2]]]))
+inouts$overlap = as.character(unlist(lapply(overlapping.dots, function (x) any(x == T))))
+```
+We can easily verify that cluster 6 has no overlapping points with any other, thus constituting one of the two "islands" in this plot:
+
+```{r}
+islands = list()
+islands[[1]] = which(table(inouts[,c(1,3)])[,1] == max(cutt)-1)
+```
+
+To verify that the overlaps make sense, we only need to make the overlap column into a square matrix and check whether it is symmetric. If the matrix is not symmetric, it may be necessary to increase the number of steps in the addPoints function.
+
+```{r, fig.width = 7, fig.height = 7, fig.align = "center"}
+inouts$overlap[inouts$overlap == "TRUE"] = as.numeric(1)
+inouts$overlap[inouts$overlap == "FALSE"] = as.numeric(0)
+inoutm = apply(matrix(inouts$overlap, nrow = 15, ncol = 15), 1, as.numeric)
+isSymmetric(inoutm, tol = 0) #0 tolerance as we only have either 1 or 0
+image(t(inoutm[nrow(inoutm):1,]), col = c("white", "slateblue"), xaxt = "n", yaxt = "n", main = "Hull overlap matrix")
+axis(1, at = seq(0,1,length.out = 15), labels = 1:15)
+axis(4, at = seq(1,0,length.out = 15), labels = 1:15, las = 2)
+```
+
+This is visually intuitive, but in order to shape this process into an automatic detection we have to work a little more. The Bellman-Ford algorithm comes in handy in this situation again: we can represent once more the clusters as nodes on an undirected graph, with edges drawn only between centers whose convex hulls overlap, and removing the single-cluster islands. Then we look again for the shortest path: nodes with distances set to infinity will be disconnected from the graph and thus will belong to a different island. We can visualize the graph structure overlaying it on the plot:
+
+```{r, fig.width = 6, fig.height = 6, fig.align = "center"}
+discard = which(rowSums(inoutm) == 1) #Another way of finding single-cluster islands
+bigisland_centers = centers[-1*discard, ]
+bigisland_arcs = data.frame(source = inouts[inouts$overlap == 1,1], target = inouts[inouts$overlap == 1, 2], weight = 1)
+plot(dat[,1], dat[,2], col = "gray", pch = 16, xlab = "tSNE 1", ylab = "tSNE 2")
+for(i in names(chullist)) 
+	{
+		polygon(polyscale(chullist[[i]], 1.4)[,1], polyscale(chullist[[i]],1.4)[,2], border =  viridis(6, option = "D")[4])
+	}
+segments(x0 = centers[bigisland_arcs$source, 1], y0 = centers[bigisland_arcs$source, 2], x1 = centers[bigisland_arcs$target, 1], y1 = centers[bigisland_arcs$target, 2])
+points(centers[,1], centers[,2], cex = 3, pch = 21, bg = "white")
+text(centers[,1], centers[,2], labels = 1:length(clcols), font = 2)
+```
+
+We can now  cyclically apply the Bellman-Ford shortest path algorithm to this graph, this time with no weights. We then check which is the node (or set of nodes) from which all other nodes are unreachable
+
+```{r}
+bigisland_arcs = as.matrix(bigisland_arcs)
+rownames(bigisland_arcs) = NULL
+
+BF_dists_2 = list()
+inf.nodes = list()
+		for(k in 1:max(unique(cutt)))
+			{
+				BF_dists_2[[k]] = optrees::getShortestPathTree(nodes = 1:max(unique(cutt)), arcs = bigisland_arcs, source.node = k, algorithm = "Bellman-Ford", directed = F, show.data = F, show.graph = F, show.distances = F)
+				inf.nodes[[k]] = which(BF_dists_2[[k]]$distances == Inf) 
+			}
+unique(inf.nodes)
+```
+
+This works for a single-cluster island, which we could have identified in a much easier way. What would happen if we added another cluster close to cluster 6, so that they would form another multi-clustered island?
+
+```{r, fig.width = 6, fig.height = 6, fig.align = "center"}
+plot(dat[,1], dat[,2], col = "gray", pch = 16, xlab = "tSNE 1", ylab = "tSNE 2")
+set.seed(513)
+rnx1 = rnorm(100, mean = 38, sd = 1.5)
+rny1 = rnorm(100, mean = 3, sd = 1.5)
+rnx2 = rnorm(100, mean = 31, sd = 1.5)
+rny2 = rnorm(100, mean = 4, sd = 1.5)
+
+points(rnx1, rny1, pch = 16, col = "purple")
+points(rnx2, rny2, pch = 16, col = "orange")
+
+```
+Fake clusters are assigned to the 2 new random coordinate sets:
+
+```{r, fig.width = 6, fig.height = 6, fig.align = "center"}
+dat2 = rbind(dat, data.frame("tSNE1_d06_p30" = rnx1, "tSNE2_d06_p30" = rny1, "cutt" = rep(16, 100)), data.frame("tSNE1_d06_p30" = rnx2, "tSNE2_d06_p30" = rny2, "cutt" = rep(17, 100))) #Add the randomly generated points to the tSNE coordinates including a fake cluster assignment
+centers2 = rbind(centers, getCenter(data.frame(rnx1, rny1)), getCenter(data.frame(rnx2, rny2)))
+plot(dat2[,1], dat2[,2], col = "gray", pch = 16, xlab = "tSNE 1", ylab = "tSNE 2")
+points(centers2[,1], centers2[,2], cex = 3, pch = 21, bg = "white")
+text(centers2[,1], centers2[,2], labels = 1:nrow(centers2), font = 2)
+
+```
+
+We can now run the convex hull algorithm as before. First we compute the scaled convex hulls:
+
+```{r, fig.width = 6, fig.height = 6, fig.align = "center"}
+plot(dat2[,1], dat2[,2], col = "gray", pch = 16, xlab = "tSNE 1", ylab = "tSNE 2")
+points(centers2[,1], centers2[,2], cex = 3, pch = 21, bg = "white")
+text(centers2[,1], centers2[,2], labels = 1:nrow(centers2), font = 2)
+chullist2= list()
+for(i in 1:max(dat2$cutt))
+{	
+	new.dat = dat2[dat2$cutt == i,1:2]
+	chullist2[[i]] = new.dat[chull(new.dat[,1], new.dat[,2]),]
+	colnames(chullist2[[i]]) = c("x", "y")
+}	
+names(chullist2) = 1:max(dat2$cutt)
+for(i in names(chullist2)) 
+	{
+		polygon(chullist2[[i]]$x, chullist2[[i]]$y)
+	}
+chullist2.scaled = lapply(chullist2, function(x) cbind(polyscale(x, 1.4)[,1], polyscale(x, 1.4)[,2]))
+for(i in names(chullist2.scaled)) 
+	{
+		polygon(chullist2.scaled[[i]][,1], chullist2.scaled[[i]][,2], border =  viridis(6, option = "D")[4])
+	}
+```
+
+We then make them denser by adding 10 points per edge and compute their overlaps:
+
+```{r, fig.width = 6, fig.height = 6, fig.align = "center"}
+chullist2.dense = lapply(chullist2.scaled, function(x) addPoints(x, 10))
+inouts2 = data.frame(expand.grid(1:max(dat2$cutt), 1:max(dat2$cutt)))
+overlapping.dots2 = apply(inouts2, 1, function(x) splancs::inout(chullist2.dense[[x[1]]], chullist2.dense[[x[2]]]))
+inouts2$overlap = as.character(unlist(lapply(overlapping.dots2, function (x) any(x == T))))
+inouts2$overlap[inouts2$overlap == "TRUE"] = as.numeric(1)
+inouts2$overlap[inouts2$overlap == "FALSE"] = as.numeric(0)
+inoutm2 = apply(matrix(inouts2$overlap, nrow = max(dat2$cutt), ncol = max(dat2$cutt)), 1, as.numeric)
+isSymmetric(inoutm2, tol = 0) #0 tolerance as we only have either 1 or 0
+image(t(inoutm2[nrow(inoutm2):1,]), col = c("white", "slateblue"), xaxt = "n", yaxt = "n", main = "Hull overlap matrix")
+axis(1, at = seq(0,1,length.out = max(dat2$cutt)), labels = 1:max(dat2$cutt))
+axis(4, at = seq(1,0,length.out = max(dat2$cutt)), labels = 1:max(dat2$cutt), las = 2)
+
+bigisland2_arcs = data.frame(source = inouts2[inouts2$overlap == 1,1], target = inouts2[inouts2$overlap == 1, 2], weight = 1)
+
+plot(dat2[,1], dat2[,2], col = "gray", pch = 16, xlab = "tSNE 1", ylab = "tSNE 2")
+for(i in names(chullist2)) 
+	{
+		polygon(polyscale(chullist2[[i]], 1.4)[,1], polyscale(chullist2[[i]],1.4)[,2], border =  viridis(6, option = "D")[4])
+	}
+segments(x0 = centers2[bigisland2_arcs$source, 1], y0 = centers2[bigisland2_arcs$source, 2], x1 = centers2[bigisland2_arcs$target, 1], y1 = centers2[bigisland2_arcs$target, 2])
+points(centers2[,1], centers2[,2], cex = 3, pch = 21, bg = "white")
+text(centers2[,1], centers2[,2], labels = 1:max(dat2$cutt), font = 2)
+```
+
+We now apply the Bellman-Ford algorithm to check which parts form islands:
+
+```{r}
+bigisland2_arcs = as.matrix(bigisland2_arcs)
+rownames(bigisland2_arcs) = NULL
+
+BF_dists_3 = list()
+inf.nodes2 = list()
+		for(k in 1:max(dat2$cutt))
+			{
+	
+				BF_dists_3[[k]] = optrees::getShortestPathTree(nodes = 1:max(dat2$cutt), arcs = bigisland2_arcs, source.node = k, algorithm = "Bellman-Ford", directed = F, show.data = F, show.graph = F, show.distances = F)
+				inf.nodes2[[k]] = which(BF_dists_3[[k]]$distances == Inf) 
+			}
+unique(inf.nodes2)
+```
+
+And indeed it is easily verifiable that those 2 groups of clusters form two separate islands (as long as the scaling factor for the hulls can identify).
+We can now draw the 2 hulls that identify those islands:
+
+```{r, fig.width = 6, fig.height = 6, fig.align = "center"}
+islandhull = list()
+for(i in unique(inf.nodes2))
+{
+	new.dat = dat2[dat2$cutt %in% i, 1:2]
+	islandhull[[paste(i, collapse = ",")]] = new.dat[chull(new.dat[,1], new.dat[,2]),]
+	colnames(islandhull[[paste(i, collapse = ",")]]) = c("x", "y")
+}
+plot(dat2[,1], dat2[,2], col = "gray", pch = 16, xlab = "tSNE 1", ylab = "tSNE 2")
+for(i in names(islandhull)) 
+	{
+		polygon(islandhull[[i]][,1], islandhull[[i]][,2], border = "darkred", lwd = 2)
+	}
+```
+
+## Shaping with $\alpha$-convex hulls
+
+Convex hulls join the outermost points but try to find the smallest set of points. The shape of the islands for which we have a visual intuition is not the one the convex hull actually draws. To get a more refined shape we can use $\alpha$-hulls, which are more general types of hulls that can also encompass non-convex shapes. $\alpha$-hulls are controlled by a parameter, $\alpha$, that determines the minimum distance in space at which two points can be joined. A large enough $\alpha$ will eventually lead to the convex hull, while a progressively smaller $\alpha$  will fragment the shape until no two points can be joined. To compute $\alpha$-hulls we will use the `ahull` function from the `alphahull` package, developed by Beatriz Pateiro-López and Alberto Rodríguez-Casal (<a href="https://www.jstatsoft.org/article/view/v034i05", target="_blank">paper</a>). The paper also provides some useful theory behind how these hulls are constructed.
+
+
+```{r, fig.width = 6, fig.height = 6, fig.align = "center"}
+islandahull = list()
+plot(dat2[,1], dat2[,2], col = "gray", pch = 16, main = expression(paste("Island boundaries by ", alpha, "-convex shape", sep = "")), xlab = "tSNE 1", ylab = "tSNE 2")
+for(i in unique(inf.nodes2))
+{
+	new.dat = dat2[dat2$cutt %in% i, 1:2]
+	li = paste(i, collapse = ",")
+	islandahull[[li]] = ahull(new.dat[,1], new.dat[,2], alpha = 3)
+	for(k in 1:nrow(islandahull[[li]]$ashape.obj$edges))
+	{
+		segments(x0 = islandahull[[li]]$ashape.obj$edges[k,3], y0 = islandahull[[li]]$ashape.obj$edges[k,4], x1 = islandahull[[li]]$ashape.obj$edges[k,5], y1 = islandahull[[li]]$ashape.obj$edges[k,6], lwd = 2, col = "darkred")
+	}
+}
+```
+
+As you can see the $\alpha$-shape follows the rougher edges of the island in a more faithful way. Of course this is greatly influenced by the choice of $\alpha$, which depends on the x and y scales of the plot. A normalization of sorts of the coordinates may be useful to automatically determine a sensible value for $\alpha$. 
+Another improvement needed concerns the plotting: as of now, because of how the objects are constructed by `ahull`, the easiest way to plot the shape is to connect its edges with the `segments` function, which slows down the process: ideally we would use the `polygon` function to plot the shape at once. 
+
+The problem we then have to solve is: given an unordered set of segment coordinates (x0, y0, x1, y1), how do we draw the corresponding polygon - if it exists?
+
+The fact that each couple of points is connected by a segments can be easily understood as a graph, for which we have to find the Hamiltonian path. Luckily there is already a library with a function to find Hamiltonian paths, `adagio` by Hans Werner Borchers (<a href = "https://cran.r-project.org/web/packages/adagio/index.html" target="_blank">CRAN page</a>). We only need to give a temporary index to each node so that they are ordered between 1 and the maximum number. 
+
+
+```{r}
+tmp = islandahull[[li]]$ashape.obj$edges[,3:6]
+dat_index_1 = vector()
+dat_index_2 = vector()
+for(i in 1:nrow(tmp))
+{
+	dat_index_1[i] = which(dat[,1] == tmp[i,1])
+	dat_index_2[i] = which(dat[,1] == tmp[i,3])
+}
+
+segmentdf = as.matrix(data.frame("ind1" = dat_index_1, "ind2" = dat_index_2))
+edges = as.vector(t(segmentdf))
+edgemap = data.frame("edge" = edges[order(edges)])
+edgemap = data.frame("edge" = edgemap[!duplicated(edgemap),], stringsAsFactors = F)
+edgemap$new.ind = as.numeric(1:nrow(tmp))
+rownames(edgemap) = as.character(edgemap$edge)
+names(edges) = edgemap[as.character(edges),2]
+ham.edges = adagio::hamiltonian(as.numeric(names(edges)), 1)
+rownames(edgemap) = edgemap$new.ind
+ham.edges.ind = edgemap[as.character(ham.edges),1]
+```
+
+We can now draw the $\alpha$-shape as a polygon in base R, which can be useful to clip Voronoi diagrams later on:
+
+
+```{r, fig.width = 6, fig.height = 6, fig.align = "center"}
+plot(dat2[,1], dat2[,2], col = "gray", pch = 16, main = expression(paste("Island boundaries by ", alpha, "-convex shape", sep = "")), xlab = "tSNE 1", ylab = "tSNE 2")
+polygon(dat[ham.edges.ind,1], dat[ham.edges.ind,2], lwd = 2, border = "purple")
+```
+
+Let's package everything in a function for automated island boundary detection, with some additional QC features. One important step is to allow the Bellman-Ford algorithm to work even when the number of usable nodes is not equal to the total number of nodes, i.e. when some islands don't overlap at all and cannot be connected. This requires a temporary reassignment of a contiguous index. Another important step concerns alpha-shapes: they are not all necessarily Hamiltonian paths, meaning there are some vertices that are visited more than once (vertices connected by more than 2 segments). In this case the shape is drawn as a set of segments, but only the convex hull can be determined as a polygon.
+
+```{r}
+#' Automated detection and shaping of "islands" in clustered dimensionality reduction scatterplots
+#' Finds groups of clusters that lie close together in space and joins them in islands
+#' @param clustercoords dataframe or matrix with 3 columns: x coordinates, y coordinates and cluster assignment (numeric)
+#' @param hull.expand numeric indicating the scaling ratio of the convex hull to calculate overlaps. Default is 1.4
+#' @param add.points numeric indicating the number of points to add to the convex hull to calculate overlaps. Default is 20
+#' @param alpha.shape numeric indicating the value of alpha to construct the alpha-convex hull
+#' @param plot.matrix logical: should the overlap matrix be plotted as well? Defaults to FALSE
+#' @param plot.hulls logical: should the (scaled) convex hulls of each cluster be plotted on top of each cluster? Defaults to TRUE
+#' @return A plot showing the dimensionality reduction scatter with polygons outlining island boundaries.
+#' @author Giuseppe D'Agostino
+#' 
+detectIslands <- function(clustercoords, hull.expand = 1.4, add.points = 20, alpha.shape = 3, plot.matrix = F, plot.hulls = T)
+
+{
+
+#Step 1: create convex hulls for every cluster
+chullist = list()
+cutt = max(clustercoords[,3])
+for(i in 1:cutt)
+{	
+	new.dat = clustercoords[clustercoords[,3] == i,1:2]
+	chullist[[i]] = new.dat[chull(new.dat[,1], new.dat[,2]),]
+	colnames(chullist[[i]]) = c("x", "y")
+}	
+names(chullist) = 1:cutt
+
+#Step 2: scale hulls
+chullist.scaled = lapply(chullist, function(x) cbind(polyscale(x, hull.expand)[,1], polyscale(x, hull.expand)[,2]))
+
+#Step 3: add points to scaled hulls
+chullist.dense = lapply(chullist.scaled, function(x) addPoints(x, add.points))
+
+#Step 4: calculate overlaps and optionally visualize overlap matrix
+inouts = data.frame(expand.grid(1:cutt, 1:cutt))
+overlapping.dots = apply(inouts, 1, function(x) splancs::inout(chullist.dense[[x[1]]], chullist.dense[[x[2]]]))
+inouts$overlap = as.character(unlist(lapply(overlapping.dots, function (x) any(x == T))))
+
+inouts$overlap[inouts$overlap == "TRUE"] = as.numeric(1)
+inouts$overlap[inouts$overlap == "FALSE"] = as.numeric(0)
+if(length(inouts[inouts$overlap == 1,1]) == length(unique(inouts$Var1))) stop("No overlaps among cluster hulls: every cluster is an island - try increasing hull.expand or add.points")
+
+inoutm = apply(matrix(inouts$overlap, nrow = cutt, ncol = cutt), 1, as.numeric)
+if(isSymmetric(inoutm, tol = 0) == F) stop("Overlap matrix not symmetric - try increasing hull.expand or add.points")#0 tolerance as we only have either 1 or 0
+if(plot.matrix == T) 
+	{
+		
+		image(t(inoutm[nrow(inoutm):1,]), col = c("white", "slateblue"), xaxt = "n", yaxt = "n", main = "Hull overlap matrix")
+		axis(1, at = seq(0,1,length.out = cutt), labels = 1:cutt)
+		axis(4, at = seq(1,0,length.out = cutt), labels = 1:cutt, las = 2)
+	}
+#Step 5: generate arcs for Bellman-Ford shortest path calculation and identify clusters forming islands
+
+island_arcs = data.frame(source = inouts[inouts$overlap == 1,1], target = inouts[inouts$overlap == 1, 2], weight = 1)
+island_arcs = as.matrix(island_arcs)
+rownames(island_arcs) = NULL
+island_arcs_pruned = island_arcs#[island_arcs[,1] != island_arcs[,2],]
+eqdf = data.frame(orig.node = unique(island_arcs_pruned[,1]), new.id = 1:length(unique(island_arcs_pruned[,1])))
+rownames(eqdf) = eqdf[,1]
+for(i in 1:nrow(island_arcs_pruned)) 
+	{
+		island_arcs_pruned[i,1] = eqdf[as.character(island_arcs_pruned[i,1]),2]
+		island_arcs_pruned[i,2] = eqdf[as.character(island_arcs_pruned[i,2]),2]
+	}
+
+BF_dists = list()
+inf.nodes = list()
+		for(k in 1:max(eqdf$new.id))
+			{
+	
+				BF_dists[[k]] =  optrees::spTreeBellmanFord(nodes = 1:max(eqdf$new.id), arcs = island_arcs_pruned, source.node = k, directed = F)
+				inf.nodes[[k]] = which(BF_dists[[k]]$distances == Inf) 
+			}
+infgroups = unique(inf.nodes)
+for(i in 1:length(infgroups))
+{
+	for(j in 1:length(infgroups[[i]]))
+	{
+		infgroups[[i]][j] = eqdf[eqdf$new.id == infgroups[[i]][j], 1]
+	}
+}
+islandgroups = lapply(infgroups, function(x) setdiff(1:cutt, x))	
+
+print(paste(length(islandgroups), "islands found"), sep = " ")
+
+#Step 6: calculate alpha-shapes for each island
+islandhull = list()
+islandahull = list()
+hamiltonianp = list()
+plot(clustercoords[,1], clustercoords[,2], col = "gray", pch = 16, main = expression(paste("Island boundaries by ", alpha, "-convex shape", sep = "")), xlab = "tSNE 1", ylab = "tSNE 2")
+
+for(i in islandgroups)
+	{
+		new.dat = clustercoords[clustercoords[,3] %in% i, 1:2]
+		li = paste(i, collapse = ",")
+		islandahull[[li]] = ahull(new.dat[,1], new.dat[,2], alpha = alpha.shape)
+	tmp = islandahull[[li]]$ashape.obj$edges[,3:6]
+	dat_index_1 = vector()
+	dat_index_2 = vector()
+		for(j in 1:nrow(tmp))
+			{
+				dat_index_1[j] = which(clustercoords[,1] == tmp[j,1])
+				dat_index_2[j] = which(clustercoords[,1] == tmp[j,3])
+			}
+
+	segmentdf = as.matrix(data.frame("ind1" = dat_index_1, "ind2" = dat_index_2))
+	edges = as.vector(t(segmentdf))
+
+	if(max(table(segmentdf)) == 2) 
+		{
+			edgemap = data.frame("edge" = edges[order(edges)])
+			edgemap = data.frame("edge" = edgemap[!duplicated(edgemap),], stringsAsFactors = F)
+			edgemap$new.ind = as.numeric(1:nrow(edgemap))
+			rownames(edgemap) = as.character(edgemap$edge)
+			names(edges) = edgemap[as.character(edges),2]
+			ham.edges = adagio::hamiltonian(as.numeric(names(edges)), 1)
+			rownames(edgemap) = edgemap$new.ind
+			hamiltonianp[[li]] = edgemap[as.character(ham.edges),1]
+			polygon(clustercoords[hamiltonianp[[li]],1], clustercoords[hamiltonianp[[li]],2], lwd = 2, border = "purple")
+		}
+	else
+		{
+			print(paste("Warning: the alpha shape for island", li, "could not be converted to a polygon because no Hamiltonian path can be found (presence of points joined by more than 2 segments). The alpha-shape will still be drawn, but the convex hull will be used for clipping", sep = " "))
+			for(k in 1:nrow(islandahull[[li]]$ashape.obj$edges))
+			{
+				segments(x0 = islandahull[[li]]$ashape.obj$edges[k,3], y0 = islandahull[[li]]$ashape.obj$edges[k,4], x1 = islandahull[[li]]$ashape.obj$edges[k,5], y1 = islandahull[[li]]$ashape.obj$edges[k,6], lwd = 2, col = "darkred")
+			}
+		
+	
+
+		polygon(new.dat[chull(new.dat),1], new.dat[chull(new.dat),2], border = "darkred", lwd = 1, lty =2)
+
+		}
+		if(plot.hulls == T) 
+				{
+					for(i in 1:cutt) 
+						{
+							polygon(chullist.scaled[[i]][,1], chullist.scaled[[i]][,2], border = "darkred", lwd = 1, lty =2)
+						}
+				}
+	}
+}
+```
+
+We can now try the function with different parameters, to see for instance how island detection changes when we use different scaling factors for the hulls or different values for alpha:
+
+```{r, fig.width = 6, fig.height = 6, fig.align = "center", error = TRUE}
+detectIslands(dat2, hull.expand = 1.4)
+detectIslands(dat2, hull.expand = 1.1)
+detectIslands(dat2, hull.expand = 0.9, plot.matrix = T)
+detectIslands(dat2, hull.expand = 0.8)
+detectIslands(dat2, hull.expand = 1.4, alpha = 1)
+```
+
+# Session info
+
+```{r}
+sessionInfo()
+```
+
+<br>
+ <a href = #top>Back to top</a>
+ <br>
+ <a href = "https://gdagstn.github.io/index.html">Back to the index page.</a>
+ <div class="tocify-extend-page" data-unique="tocify-extend-page" style="height: 0;"></div>
+

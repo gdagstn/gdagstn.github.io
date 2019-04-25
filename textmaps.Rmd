@@ -1,0 +1,236 @@
+---
+title: "Crayonmaps"
+author: Giuseppe D'Agostino
+output:
+    html_document:
+        toc: true
+        toc_float: true
+        theme: 'cosmo'
+        highlight: 'tango'
+        code_folding: show
+        df_print: paged
+---
+ <br>
+ <a href = "https://gdagstn.github.io">Back to the index page.</a>
+ <br>
+
+## Introduction
+
+This is an implementation of Gábor Csárdi's `crayon` R <a href = "https://github.com/r-lib/crayon" target = "_blank">package</a> to draw heatmaps directly in the terminal using 256-color ANSI specification. 
+Rendering in the HTML Markdown is made possible thanks to Brodie Gaslam's  `fansi` R <a href = "https://github.com/brodieG/fansi" target = "_blank">package</a>. 
+
+<br>
+
+
+## Classes and functions
+
+### crayonmap class
+
+ We first define the `crayonmap` class. For now it's not very useful, but since the ANSI map is actually rendered as a vector by `cat`, it is useful to retain some info regarding the original dimensions of the matrix.
+
+```{r}
+setClass("crayonmap", representation(crayons = "character", row.num = "numeric", col.num = "numeric"))
+
+```
+
+### colorKey()
+
+We then define some important functions. The first one borrows directly from `pheatmap`, R <a href = "https://cran.r-project.org/web/packages/pheatmap/pheatmap.pdf" target = "_blank">package</a> by Raivo Kolde and is used to map colors to values. Values are automatically scaled, since that is the default view of heatmaps. However this can be disabled.
+
+
+```{r}
+#' Color key
+#' @param values vector of numeric values to which colors will be mapped
+#' @param pal color palette 
+#' @param scale logical, should values be scaled? Defaults to TRUE
+#' @return a vector of colors, mapped to the values and in the same order as the values vector
+#' @author Giuseppe D'Agostino
+
+colorKey <- function(values, 
+					 pal = colorRampPalette(c("red", "gray", "blue"))(24), 
+					 scale = T)
+{
+    require(pheatmap)
+
+    if(scale == T) values_sc <- scale(values) else values_sc <- values
+    bks <- pheatmap:::generate_breaks(values_sc, length(pal), center = F)
+    cols <- pheatmap:::scale_colours(values_sc, col=pal, breaks=bks, na_col = "gray")
+    cols <- as.character(cols)
+    return(cols)
+} 
+```
+
+### paintCrayon()
+
+Then a placeholder function to print a `crayonmap` class object. This is not yet very useful, but I will add some functionalities in the future.
+
+```{r}
+paintCrayon <- function(cmap)
+{	
+	if(!is(cmap, "crayonmap")) stop("Must supply a crayonmap object.")
+
+	cat(cmap@crayons, sep = "")
+}
+
+```
+
+### textHeatmap()
+
+Then we define the actual function to plot the heatmap. Its setup borrows heavily from `pheatmap`. Clustering is allowed, both on rows and columns, and the user can choose among several distance methods (as accepted by `dist`) and several clustering methods (as accepted by `hclust`). A plot title and key title can be also provided. The column legend is shown separately because column names do not fit in the slim margin of three white spaces (which make up the coloured block in the heatmap). In the future I will add pheatmap-style annotations, and maybe dendrograms. 
+The trick that makes this function fast is adding endlines to the 2D matrix and then flattening the matrix in a single character vector. This way the application of `cat` to print the heatmap is vectorized.
+
+```{r}
+
+#' Text-based heatmap,
+#' @param dat matrix with numeric values, rownames and colnames
+#' @param cols color palette 
+#' @param cluster_cols logical, should columns be clustered by hierarchical clustering? default is TRUE
+#' @param cluster_rows logical, should rows be clustered by hierarchical clustering? default is TRUE
+#' @param dist_method character, distance method used by dist
+#' @param clustering_method character, clustering method used by hclust 
+#' @param main character, title of the heatmap
+#' @param key character, title of the color legend
+#' @param show_col_legend logical, should the column legend be shown at the end of the plot? default is TRUE
+#' @return a text-based heatmap directly in the terminal output using ANSI background styles. Useful when your X11 forwarding is broken or for quick exploratory analysis of small datasets. Setup is largely inspired by pheatmap.
+
+textHeatmap <-function(dat, 
+	pal = colorRampPalette(c("red", "gray", "blue"))(24), 
+	cluster_cols = T, 
+	cluster_rows = T,
+	dist_method = "euclidean",
+	clustering_method = "complete",
+	main = "Heatmap",
+	 key = "Key", 
+	 show_col_legend = T)
+{
+
+require(crayon)
+
+#Clustering
+if(cluster_rows == T){ 
+	hr = hclust(                #Hierarchical clustering of the rows
+        dist(dat, method = dist_method), 
+        method = clustering_method
+                )
+} else {
+	hr = list("order" = 1:nrow(dat))
+}
+
+if(cluster_cols == T){
+ hc = hclust(
+ 	dist(t(dat), method = dist_method),  #Hierarchical clustering of columns (same as rows but transposing the matrix)
+        method = clustering_method)
+} else {
+	hc = list("order" = 1:ncol(dat))
+}
+
+dat = dat[hr$order, hc$order]
+
+#Colour rendering and crayonmap object
+crayonstrings <- matrix(unlist(sapply(colorKey(as.vector(dat), pal = pal), function(x) crayon::make_style(x, bg = T)("   "))), nrow = nrow(dat))
+
+crayonstrings[,ncol(crayonstrings)] <- paste(crayonstrings[,ncol(crayonstrings)], crayon::reset("   "), rownames(dat), "\n", sep = "")
+
+	crayonstrings[,1] <- paste("   ", crayonstrings[,1], sep = "")
+
+	crayons <- as.vector(t(crayonstrings))
+
+	cmap <- new("crayonmap", crayons = crayons, row.num = nrow(dat), col.num = ncol(dat))
+
+# Column names
+
+	#padding
+cat("\n \n")
+cat("   ")
+
+for(k in 1:ncol(dat)){
+	if(nchar(k) == 1) cat(paste(" ",k," ", sep = ""))
+		else if(nchar(k) == 2) cat(paste(k, " ",sep = ""))
+}
+cat("\n")
+
+#Plot the heatmap
+paintCrayon(cmap)
+
+#Color Key
+
+	#padding
+cat("\n \n") 
+cat("   ")
+ckey <- unique(unlist(sapply(pal, function(x) crayon::make_style(x, bg = T)("   "))))
+mid.value = round((max(hmap)-min(hmap))/2)
+cat("Key", "\n", "   ", round(min(dat)), rep("   ", length(ckey)/2), mid.value,  rep("   ", (length(ckey)/2)-1), " ", round(max(dat)), "\n", "   ", ckey, "\n\n", sep = "")
+
+#Column legend
+if(show_col_legend == T){
+		cat("   ")
+		cat("Column legend:\n")
+	for(i in 1:ncol(dat)) cat(paste("   ", i, ":", colnames(dat)[i], "\n", sep = ""))
+	}
+}
+```
+
+
+## Examples
+
+Let's generate some toy examples. We will use fansi to set knitr hooks that will allow the visualization of ANSI in the HTML file:
+
+
+```{r, eval = FALSE}
+hmap = matrix(0, ncol = 10, nrow = 20)
+for(i in 1:10)  hmap[,i] = runif(20, i, i*3) 
+rownames(hmap) = paste("Gene", 1:nrow(hmap))
+colnames(hmap) = paste("Sample", 1:ncol(hmap))
+textHeatmap(hmap)
+textHeatmap(hmap, colorRampPalette(c("red", "gray", "blue"))(24))
+textHeatmap(hmap, viridis::viridis(option = "B", 24))
+textHeatmap(hmap, pal = colorspace::sequential_hcl("Sunset", n = 24))
+textHeatmap(hmap, viridis::viridis(option = "B", 24), cluster_cols = F, cluster_rows = F)
+```
+
+```{r, echo=FALSE, comment="", results="asis"}
+old.hooks <- fansi::set_knit_hooks(knitr::knit_hooks)
+```
+```{r, echo = FALSE}
+options(crayon.enabled=TRUE)
+
+
+textHeatmap(hmap)
+textHeatmap(hmap, colorRampPalette(c("red", "gray", "blue"))(24))
+textHeatmap(hmap, viridis::viridis(option = "B", 24))
+textHeatmap(hmap, pal = colorspace::sequential_hcl("Sunset", n = 24))
+textHeatmap(hmap, viridis::viridis(option = "B", 24), cluster_cols = F, cluster_rows = F)
+```
+
+## R session info
+
+```{r}
+sessionInfo()
+```
+
+
+## Improvements
+
+Some things still need further improvements:
+
+1) displaying the column legend on more columns
+2) the 256-color ANSI palette is not as extended as RGB, and sometimes the conversion can make perceptually uniform palettes less uniform, even swapping luminance levels. A simple function reordering colors by luminance can be considered.
+3) user-provided row labels
+
+
+## Acknowledgments
+
+Thanks to:
+<ul>
+<li> **Gábor Csárdi** for the `crayon` package</li>
+<li> **Brodie Gaslam** for the `fansi` package and his help in getting it to show in markdowns </li>
+<li> **Raivo Kolde** for the `pheatmap` package.</li>
+</ul>
+
+<br>
+ <a href = #top>Back to top</a>
+ <br>
+ <a href = "https://gdagstn.github.io/index.html">Back to the index page.</a>
+ <div class="tocify-extend-page" data-unique="tocify-extend-page" style="height: 0;"></div>
+
+
