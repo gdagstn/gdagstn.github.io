@@ -28,3 +28,5 @@ A <a href = "https://gdagstn.github.io/tsnecolors.html" target="_blank">set of f
 #Degenerative art in R
 Some <a href = "https://gdagstn.github.io/degenerative.html" target="_blank">attempts</a> at creating "algorithmic art", or generative art, using random plotting with regular elements, or regular plotting with random elements. 
 
+#Crayonmaps art in R
+A <a href = "https://gdagstn.github.io/textheatmaps.html" target="_blank">set of functions</a> to generate heatmaps and bitmaps in the R terminal using 256-color ANSI text encoding
