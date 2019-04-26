@@ -48,11 +48,11 @@ We then define some important functions. The first one borrows directly from `ph
 
 colorKey <- function(values, 
 					 pal = colorRampPalette(c("red", "gray", "blue"))(24), 
-					 scale = T)
+					 scale = TRUE)
 {
     require(pheatmap)
 
-    if(scale == T) values_sc <- scale(values) else values_sc <- values
+    if(scale == TRUE) values_sc <- scale(values) else values_sc <- values
     bks <- pheatmap:::generate_breaks(values_sc, length(pal), center = F)
     cols <- pheatmap:::scale_colours(values_sc, col=pal, breaks=bks, na_col = "gray")
     cols <- as.character(cols)
@@ -95,19 +95,19 @@ The trick that makes this function fast is adding endlines to the 2D matrix and 
 
 textHeatmap <-function(dat, 
 	pal = colorRampPalette(c("red", "gray", "blue"))(24), 
-	cluster_cols = T, 
-	cluster_rows = T,
+	cluster_cols = TRUE, 
+	cluster_rows = TRUE,
 	dist_method = "euclidean",
 	clustering_method = "complete",
 	main = "Heatmap",
 	 key = "Key", 
-	 show_col_legend = T)
+	 show_col_legend = TRUE)
 {
 
 require(crayon)
 
 #Clustering
-if(cluster_rows == T){ 
+if(cluster_rows == TRUE){ 
 	hr = hclust(                #Hierarchical clustering of the rows
         dist(dat, method = dist_method), 
         method = clustering_method
@@ -116,7 +116,7 @@ if(cluster_rows == T){
 	hr = list("order" = 1:nrow(dat))
 }
 
-if(cluster_cols == T){
+if(cluster_cols == TRUE){
  hc = hclust(
  	dist(t(dat), method = dist_method),  #Hierarchical clustering of columns (same as rows but transposing the matrix)
         method = clustering_method)
@@ -157,12 +157,12 @@ paintCrayon(cmap)
 	#padding
 cat("\n \n") 
 cat("   ")
-ckey <- unique(unlist(sapply(pal, function(x) crayon::make_style(x, bg = T)("   "))))
-mid.value = round((max(hmap)-min(hmap))/2)
-cat("Key", "\n", "   ", round(min(dat)), rep("   ", length(ckey)/2), mid.value,  rep("   ", (length(ckey)/2)-1), " ", round(max(dat)), "\n", "   ", ckey, "\n\n", sep = "")
+ckey <- unique(unlist(sapply(pal, function(x) crayon::make_style(x, bg = TRUE)("   "))))
+mid.value = round(abs((max(dat))-min(abs(dat)))/2)
+cat("Key", "\n", "   ", round(abs(min(dat))), rep("   ", length(ckey)/2), mid.value,  rep("   ", (length(ckey)/2)-1), " ", round(abs(max(dat))), "\n", "   ", ckey, "\n\n", sep = "")
 
 #Column legend
-if(show_col_legend == T){
+if(show_col_legend == TRUE){
 		cat("   ")
 		cat("Column legend:\n")
 	for(i in 1:ncol(dat)) cat(paste("   ", i, ":", colnames(dat)[i], "\n", sep = ""))
@@ -224,6 +224,7 @@ Thanks to:
 <ul>
 <li> **Gábor Csárdi** for the `crayon` package</li>
 <li> **Brodie Gaslam** for the `fansi` package and his help in getting it to show in markdowns </li>
+<li> **Alan O'Callaghan** for testing and pointing out bugs in the code </li>
 <li> **Raivo Kolde** for the `pheatmap` package.</li>
 </ul>
 

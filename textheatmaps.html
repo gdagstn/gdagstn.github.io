@@ -378,11 +378,11 @@ div.tocify {
 
 colorKey &lt;-<span class="st"> </span>function(values, 
                      <span class="dt">pal =</span> <span class="kw">colorRampPalette</span>(<span class="kw">c</span>(<span class="st">&quot;red&quot;</span>, <span class="st">&quot;gray&quot;</span>, <span class="st">&quot;blue&quot;</span>))(<span class="dv">24</span>), 
-                     <span class="dt">scale =</span> T)
+                     <span class="dt">scale =</span> <span class="ot">TRUE</span>)
 {
     <span class="kw">require</span>(pheatmap)
 
-    if(scale ==<span class="st"> </span>T) values_sc &lt;-<span class="st"> </span><span class="kw">scale</span>(values) else values_sc &lt;-<span class="st"> </span>values
+    if(scale ==<span class="st"> </span><span class="ot">TRUE</span>) values_sc &lt;-<span class="st"> </span><span class="kw">scale</span>(values) else values_sc &lt;-<span class="st"> </span>values
     bks &lt;-<span class="st"> </span>pheatmap:::<span class="kw">generate_breaks</span>(values_sc, <span class="kw">length</span>(pal), <span class="dt">center =</span> F)
     cols &lt;-<span class="st"> </span>pheatmap:::<span class="kw">scale_colours</span>(values_sc, <span class="dt">col=</span>pal, <span class="dt">breaks=</span>bks, <span class="dt">na_col =</span> <span class="st">&quot;gray&quot;</span>)
     cols &lt;-<span class="st"> </span><span class="kw">as.character</span>(cols)
@@ -416,19 +416,19 @@ colorKey &lt;-<span class="st"> </span>function(values,
 
 textHeatmap &lt;-function(dat, 
     <span class="dt">pal =</span> <span class="kw">colorRampPalette</span>(<span class="kw">c</span>(<span class="st">&quot;red&quot;</span>, <span class="st">&quot;gray&quot;</span>, <span class="st">&quot;blue&quot;</span>))(<span class="dv">24</span>), 
-    <span class="dt">cluster_cols =</span> T, 
-    <span class="dt">cluster_rows =</span> T,
+    <span class="dt">cluster_cols =</span> <span class="ot">TRUE</span>, 
+    <span class="dt">cluster_rows =</span> <span class="ot">TRUE</span>,
     <span class="dt">dist_method =</span> <span class="st">&quot;euclidean&quot;</span>,
     <span class="dt">clustering_method =</span> <span class="st">&quot;complete&quot;</span>,
     <span class="dt">main =</span> <span class="st">&quot;Heatmap&quot;</span>,
      <span class="dt">key =</span> <span class="st">&quot;Key&quot;</span>, 
-     <span class="dt">show_col_legend =</span> T)
+     <span class="dt">show_col_legend =</span> <span class="ot">TRUE</span>)
 {
 
 <span class="kw">require</span>(crayon)
 
 <span class="co">#Clustering</span>
-if(cluster_rows ==<span class="st"> </span>T){ 
+if(cluster_rows ==<span class="st"> </span><span class="ot">TRUE</span>){ 
     hr =<span class="st"> </span><span class="kw">hclust</span>(                <span class="co">#Hierarchical clustering of the rows</span>
         <span class="kw">dist</span>(dat, <span class="dt">method =</span> dist_method), 
         <span class="dt">method =</span> clustering_method
@@ -437,7 +437,7 @@ if(cluster_rows ==<span class="st"> </span>T){
     hr =<span class="st"> </span><span class="kw">list</span>(<span class="st">&quot;order&quot;</span> =<span class="st"> </span><span class="dv">1</span>:<span class="kw">nrow</span>(dat))
 }
 
-if(cluster_cols ==<span class="st"> </span>T){
+if(cluster_cols ==<span class="st"> </span><span class="ot">TRUE</span>){
  hc =<span class="st"> </span><span class="kw">hclust</span>(
     <span class="kw">dist</span>(<span class="kw">t</span>(dat), <span class="dt">method =</span> dist_method),  <span class="co">#Hierarchical clustering of columns (same as rows but transposing the matrix)</span>
         <span class="dt">method =</span> clustering_method)
@@ -478,12 +478,12 @@ for(k in <span class="dv">1</span>:<span class="kw">ncol</span>(dat)){
     <span class="co">#padding</span>
 <span class="kw">cat</span>(<span class="st">&quot;</span><span class="ch">\n</span><span class="st"> </span><span class="ch">\n</span><span class="st">&quot;</span>) 
 <span class="kw">cat</span>(<span class="st">&quot;   &quot;</span>)
-ckey &lt;-<span class="st"> </span><span class="kw">unique</span>(<span class="kw">unlist</span>(<span class="kw">sapply</span>(pal, function(x) crayon::<span class="kw">make_style</span>(x, <span class="dt">bg =</span> T)(<span class="st">&quot;   &quot;</span>))))
-mid.value =<span class="st"> </span><span class="kw">round</span>((<span class="kw">max</span>(hmap)-<span class="kw">min</span>(hmap))/<span class="dv">2</span>)
-<span class="kw">cat</span>(<span class="st">&quot;Key&quot;</span>, <span class="st">&quot;</span><span class="ch">\n</span><span class="st">&quot;</span>, <span class="st">&quot;   &quot;</span>, <span class="kw">round</span>(<span class="kw">min</span>(dat)), <span class="kw">rep</span>(<span class="st">&quot;   &quot;</span>, <span class="kw">length</span>(ckey)/<span class="dv">2</span>), mid.value,  <span class="kw">rep</span>(<span class="st">&quot;   &quot;</span>, (<span class="kw">length</span>(ckey)/<span class="dv">2</span>)-<span class="dv">1</span>), <span class="st">&quot; &quot;</span>, <span class="kw">round</span>(<span class="kw">max</span>(dat)), <span class="st">&quot;</span><span class="ch">\n</span><span class="st">&quot;</span>, <span class="st">&quot;   &quot;</span>, ckey, <span class="st">&quot;</span><span class="ch">\n\n</span><span class="st">&quot;</span>, <span class="dt">sep =</span> <span class="st">&quot;&quot;</span>)
+ckey &lt;-<span class="st"> </span><span class="kw">unique</span>(<span class="kw">unlist</span>(<span class="kw">sapply</span>(pal, function(x) crayon::<span class="kw">make_style</span>(x, <span class="dt">bg =</span> <span class="ot">TRUE</span>)(<span class="st">&quot;   &quot;</span>))))
+mid.value =<span class="st"> </span><span class="kw">round</span>(<span class="kw">abs</span>((<span class="kw">max</span>(dat))-<span class="kw">min</span>(<span class="kw">abs</span>(dat)))/<span class="dv">2</span>)
+<span class="kw">cat</span>(<span class="st">&quot;Key&quot;</span>, <span class="st">&quot;</span><span class="ch">\n</span><span class="st">&quot;</span>, <span class="st">&quot;   &quot;</span>, <span class="kw">round</span>(<span class="kw">abs</span>(<span class="kw">min</span>(dat))), <span class="kw">rep</span>(<span class="st">&quot;   &quot;</span>, <span class="kw">length</span>(ckey)/<span class="dv">2</span>), mid.value,  <span class="kw">rep</span>(<span class="st">&quot;   &quot;</span>, (<span class="kw">length</span>(ckey)/<span class="dv">2</span>)-<span class="dv">1</span>), <span class="st">&quot; &quot;</span>, <span class="kw">round</span>(<span class="kw">abs</span>(<span class="kw">max</span>(dat))), <span class="st">&quot;</span><span class="ch">\n</span><span class="st">&quot;</span>, <span class="st">&quot;   &quot;</span>, ckey, <span class="st">&quot;</span><span class="ch">\n\n</span><span class="st">&quot;</span>, <span class="dt">sep =</span> <span class="st">&quot;&quot;</span>)
 
 <span class="co">#Column legend</span>
-if(show_col_legend ==<span class="st"> </span>T){
+if(show_col_legend ==<span class="st"> </span><span class="ot">TRUE</span>){
         <span class="kw">cat</span>(<span class="st">&quot;   &quot;</span>)
         <span class="kw">cat</span>(<span class="st">&quot;Column legend:</span><span class="ch">\n</span><span class="st">&quot;</span>)
     for(i in <span class="dv">1</span>:<span class="kw">ncol</span>(dat)) <span class="kw">cat</span>(<span class="kw">paste</span>(<span class="st">&quot;   &quot;</span>, i, <span class="st">&quot;:&quot;</span>, <span class="kw">colnames</span>(dat)[i], <span class="st">&quot;</span><span class="ch">\n</span><span class="st">&quot;</span>, <span class="dt">sep =</span> <span class="st">&quot;&quot;</span>))
@@ -761,6 +761,9 @@ Thanks to:
 </li>
 <li> 
 <strong>Brodie Gaslam</strong> for the <code>fansi</code> package and his help in getting it to show in markdowns
+</li>
+<li> 
+<strong>Alan O’Callaghan</strong> for testing and pointing out bugs in the code
 </li>
 <li> 
 <strong>Raivo Kolde</strong> for the <code>pheatmap</code> package.
