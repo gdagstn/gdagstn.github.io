@@ -1,0 +1,257 @@
+---
+title: "Pruning fgsea results using the GO graph"
+author: "Giuseppe D'Agostino"
+date: "2/24/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+  
+Load necessary libraries
+
+```{r libraries}
+library(GO.db)
+library(fgsea)
+library(BiocParallel)
+library(msigdbr)
+library(tidyverse)
+library(ggplot2)
+library(AnnotationDbi)
+library(igraph)
+library(Rgraphviz)
+```
+
+Read in the `DESeq2` results
+
+```{r read_counts}
+res.dds.lps.sh <- readRDS(file = "res_lps_sh.RDS")
+```
+
+Rank by the Wald test statistic
+
+```{r rank}
+lps.ranks.frame <- res.dds.lps.sh %>% 
+  dplyr::select(entrezgene_id, stat) %>% 
+  na.omit() %>% 
+  distinct() %>% 
+  group_by(entrezgene_id) %>% 
+  summarize(stat=mean(stat))
+
+lps.ranks <- deframe(lps.ranks.frame)
+```
+
+We get all the genesets in Gene Ontology (C5)
+
+```{r get_genesets}
+go.genesets <- msigdbr(species = "Mus musculus", category = "C5")
+```
+
+Prepare a list of genesets and convert IDs to Entrez
+
+```{r wrangle_ids}
+go.genesets = as.data.frame(go.genesets, stringsAsFactors = FALSE)
+go.genesets$entrez_gene = as.character(go.genesets$entrez_gene)
+go.list <- lapply(unique(go.genesets$gs_name), function(x) go.genesets[go.genesets$gs_name == x, "entrez_gene"])
+names(go.list) = unique(go.genesets$gs_exact_source)  ##IMPORTANT: use gs_exact_source to retain the GO ID
+```
+
+
+Run `fgsea`
+
+```{r run_fgsea}
+fgsea.lps.go <- fgsea(pathways = go.list, 
+                      stats = lps.ranks,
+                      nperm = 10000,
+                      BPPARAM = SnowParam())
+```
+
+
+Add names and subcategories to the fgsea results table
+
+```{r}
+goid_to_name <- as.data.frame(cbind(unique(go.genesets$gs_exact_source), unique(go.genesets$gs_name)))
+goid_and_subcat <- as.data.frame(unique(go.genesets[,c("gs_subcat", "gs_exact_source")]))
+rownames(goid_and_subcat) <- goid_and_subcat$gs_exact_source
+colnames(goid_to_name) <- c("GO_ID", "name")
+rownames(goid_to_name) <- goid_to_name$GO_ID
+goid_to_name$subcat <- goid_and_subcat[rownames(goid_and_subcat), "gs_subcat"]
+
+fgsea.lps.go$name <- goid_to_name[fgsea.lps.go$pathway, "name"]
+fgsea.lps.go$subcat <- goid_to_name[fgsea.lps.go$pathway, "subcat"]
+fgsea.lps.go$subcat <- gsub(fgsea.lps.go$subcat, pattern = "GO:", replacement = "")
+
+fgsea.lps.go <- fgsea.lps.go[fgsea.lps.go$subcat != "HPO"] # we remove HP terms because they are not in the GO graph
+fgsea.lps.go$padj <- p.adjust(fgsea.lps.go$pval, method = "fdr")
+```
+
+
+Here is the `fgsea` result pruning function: treats significant and non-significant categories separately. 
+
+- Non-significant categories are only kept if they don't have children categories.
+
+- Significant categories are only kept if they do not have enriched children categories
+
+- Adjusted p-values are recalculated on the nominal p-values from the pruned categories.
+
+```{r prune_function}
+pruneGO_FGSEA <- function(fgsea_res, 
+                         go_sub = c("BP", "MF", "CC"),
+                         alpha = 0.05){
+  
+  fgsea_res <- fgsea_res[which(fgsea_res$subcat == go_sub),]
+
+  if(go_sub == "BP") go_subcategory = GOBPCHILDREN 
+    else  if(go_sub == "MF") go_subcategory = GOMFCHILDREN
+    else  if(go_sub == "CC") go_subcategory = GOCCCHILDREN 
+  
+  go_children <- as.list(go_subcategory)
+  go_haschildren <- go_children[!is.na(go_children)]
+  
+  fgsea_res$has_children <- sapply(fgsea_res$pathway, function(x) x %in% names(go_haschildren))
+
+  fgsea_res_sig <- fgsea_res[fgsea_res$pval < alpha,]
+
+  fgsea_res_sig$has_sig_children <- sapply(fgsea_res_sig$pathway, 
+                                            function(x) any(go_haschildren[[x]] %in% fgsea_res_sig$pathway))
+   
+  fgsea_res_sig$keep <- (fgsea_res_sig$has_children == FALSE) | (fgsea_res_sig$has_children == TRUE & fgsea_res_sig$has_sig_children == FALSE) 
+  
+  fgsea_res_ns_childless <- fgsea_res[which(fgsea_res$pval >= alpha & !fgsea_res$has_children),]
+
+  pruned <- rbind(fgsea_res_sig[fgsea_res_sig$keep,1:11], fgsea_res_ns_childless[,1:11])
+  
+  pruned$padj_2 <- p.adjust(pruned$pval, method = "fdr")
+  
+  pruned_len <- length(setdiff(pruned$pathway, fgsea_res_sig$pathway))
+  message("Pruned ", pruned_len, " terms.")
+  
+  return(pruned)
+  
+ }
+```
+
+Prune separately by different subcategory (necessary to look for children in the right DAG)
+
+```{r}
+fgsea.lps.go.bp.pruned <- pruneGO_FGSEA(fgsea.lps.go, go_sub = "BP", alpha = 0.05)
+fgsea.lps.go.mf.pruned <- pruneGO_FGSEA(fgsea.lps.go, go_sub = "MF", alpha = 0.05)
+fgsea.lps.go.cc.pruned <- pruneGO_FGSEA(fgsea.lps.go, go_sub = "CC", alpha = 0.05)
+```
+
+Join all tables and perform (without overwriting) fdr correction
+
+```{r join_tables}
+fgsea.lps.go.all.pruned <- rbind(fgsea.lps.go.bp.pruned, fgsea.lps.go.mf.pruned, fgsea.lps.go.cc.pruned)
+fgsea.lps.go.all.pruned$padj_3 <- p.adjust(fgsea.lps.go.all.pruned$pval, method = 'fdr')
+```
+
+Check nominal p value histogram as sanity check
+
+```{r pval_hist}
+hist(fgsea.lps.go.all.pruned$pval)
+```
+
+Select significant results
+
+```{r select_sig}
+fgsea.lps.go.all.pruned.sig <- fgsea.lps.go.all.pruned[fgsea.lps.go.all.pruned$padj_2 < 0.05,]
+```
+
+How many new significant terms did we gain? 
+
+```{r terms_gained}
+nrow(fgsea.lps.go.all.pruned.sig) -  length(which(fgsea.lps.go[fgsea.lps.go$pathway %in% fgsea.lps.go.all.pruned.sig$pathway,"padj"] < 0.05))
+
+plot(x = -log10(fgsea.lps.go.all.pruned.sig$padj_2), y = -log10(as.data.frame(fgsea.lps.go)[fgsea.lps.go$pathway %in% fgsea.lps.go.all.pruned.sig$pathway,"padj"]), ylim = c(0, 2.3), xlim = c(0,2.3))
+abline(h = -log10(0.05), col = 'red')
+abline(v = -log10(0.05), col = 'red')
+```
+
+Interesting terms
+
+```{r interesting_res_plot}
+fgsea_interesting <- fgsea.lps.go.all.pruned.sig[grep("MITO|LIP|METAB|ENDOC|PHAG|GLU", fgsea.lps.go.all.pruned.sig$name),]
+
+ggplot(fgsea_interesting, aes(x = reorder(name, NES), y = NES, col = subcat)) + 
+  geom_point(aes(size = -log10(padj_2))) + 
+  coord_flip() + 
+  facet_wrap(~subcat) +
+  theme_bw()
+
+```
+
+Top 30 terms (ranked by NES)
+
+```{r top30}
+fgsea_top30 <- fgsea.lps.go.all.pruned.sig[order(abs(fgsea.lps.go.all.pruned.sig$NES), decreasing = TRUE)[1:30],]
+
+ggplot(fgsea_top30, aes(x = reorder(name, NES), y = NES, col = subcat )) + 
+  geom_point(aes(size = -log10(padj_2))) + 
+  coord_flip() + 
+  facet_wrap(~subcat) +
+  theme_bw()
+
+```
+
+Top 30 in the non-pruned table:
+
+```{r top30_nonpruned}
+fgsea.lps.go$padj_2 <- p.adjust(fgsea.lps.go$pval, method = "fdr")
+fgsea.lps.go.sig <- fgsea.lps.go[fgsea.lps.go$padj_2 < 0.05,]
+fgsea_top30_nonpruned <- fgsea.lps.go.sig[order(abs(fgsea.lps.go.sig$NES), decreasing = TRUE)[1:30],]
+
+ggplot(fgsea_top30_nonpruned, aes(x = reorder(name, NES), y = NES, col = subcat )) + 
+  geom_point(aes(size = -log10(padj_2))) + 
+  coord_flip() + 
+  facet_wrap(~subcat) +
+  theme_bw()
+
+```
+
+
+Did the pruning algorithm work?
+
+```{r, check_graphs}
+graph.par(list(nodes=list(fontsize=40)))
+
+fgsea.lps.go.sig.nominal <- fgsea.lps.go[fgsea.lps.go$pval < 0.05,]
+fgsea.lps.go.mf.pruned.sig <- fgsea.lps.go.mf.pruned[fgsea.lps.go.mf.pruned$padj_2 < 0.05,]
+
+mfgraph <- igraph::graph_from_graphnel(makeGOGraph("mf")) 
+mfgraph_induced <- igraph::subgraph(mfgraph, v = which(names(V(mfgraph)) %in% fgsea.lps.go.sig.nominal$pathway))
+mfgraphnel <- igraph::igraph.to.graphNEL(mfgraph_induced)
+mfgraphnel <- layoutGraph(mfgraphnel)
+nodeRenderInfo(mfgraphnel)$fill[fgsea.lps.go.mf.pruned$pathway] <- 'red' 
+nodeRenderInfo(mfgraphnel)$col[fgsea.lps.go.mf.pruned$pathway] <- 'red' 
+nodeRenderInfo(mfgraphnel)$fill[fgsea.lps.go.mf.pruned.sig$pathway] <- 'blue' 
+nodeRenderInfo(mfgraphnel)$col[fgsea.lps.go.mf.pruned.sig$pathway] <- 'blue' 
+renderGraph(mfgraphnel)
+
+fgsea.lps.go.bp.pruned.sig <- fgsea.lps.go.bp.pruned[fgsea.lps.go.bp.pruned$padj_2 < 0.05,]
+
+bpgraph <- igraph::graph_from_graphnel(makeGOGraph("bp"))
+bpgraph_induced <- igraph::subgraph(bpgraph, v = which(names(V(bpgraph)) %in% fgsea.lps.go.sig.nominal$pathway))
+bpgraphnel <- igraph::igraph.to.graphNEL(bpgraph_induced)
+bpgraphnel <- layoutGraph(bpgraphnel)
+nodeRenderInfo(bpgraphnel)$fill[fgsea.lps.go.bp.pruned$pathway] <- 'red' 
+nodeRenderInfo(bpgraphnel)$col[fgsea.lps.go.bp.pruned$pathway] <- 'red' 
+nodeRenderInfo(bpgraphnel)$fill[fgsea.lps.go.bp.pruned.sig$pathway] <- 'blue' 
+nodeRenderInfo(bpgraphnel)$col[fgsea.lps.go.bp.pruned.sig$pathway] <- 'blue' 
+renderGraph(bpgraphnel)
+
+
+fgsea.lps.go.cc.pruned.sig <- fgsea.lps.go.cc.pruned[fgsea.lps.go.cc.pruned$padj_2 < 0.05,]
+
+ccgraph <- igraph::graph_from_graphnel(makeGOGraph("cc"))
+ccgraph_induced <- igraph::subgraph(ccgraph, v = which(names(V(ccgraph)) %in% fgsea.lps.go.sig.nominal$pathway))
+ccgraphnel <- igraph::igraph.to.graphNEL(ccgraph_induced)
+ccgraphnel <- layoutGraph(ccgraphnel)
+nodeRenderInfo(ccgraphnel)$fill[fgsea.lps.go.cc.pruned$pathway] <- 'red' 
+nodeRenderInfo(ccgraphnel)$col[fgsea.lps.go.cc.pruned$pathway] <- 'red' 
+nodeRenderInfo(ccgraphnel)$fill[fgsea.lps.go.cc.pruned.sig$pathway] <- 'blue' 
+nodeRenderInfo(ccgraphnel)$col[fgsea.lps.go.cc.pruned.sig$pathway] <- 'blue'  
+renderGraph(ccgraphnel)
+```
